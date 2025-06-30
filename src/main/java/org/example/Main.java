@@ -20,40 +20,60 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.eclipse.jgit.diff.DiffEntry;
 
 public class Main {
     private static final String PROJECT_NAME = "BOOKKEEPER";
     private static final String REPO_PATH_STR = "C:/Users/aroma/IdeaProjects/bookkeeper";
+    private static final String OUTPUT_CSV_PATH = "./bookkeeper_dataset_milestone1.csv";
 
     public static void main(String[] args) {
         long totalStartTime = System.currentTimeMillis();
-        System.out.println("Avvio Processo di Estrazione per il Progetto: " + PROJECT_NAME);
+        System.out.println("Avvio Processo di Estrazione (Milestone 1) per Progetto: " + PROJECT_NAME);
 
         try (GitService gitService = new GitService(Paths.get(REPO_PATH_STR));
              JiraService jiraService = new JiraService()) {
 
-            // --- 1. RACCOLTA DATI GLOBALE ---
+            // --- 1. RACCOLTA DATI E PRE-CALCOLO ---
             List<Release> allReleases = gitService.getReleases();
             List<JiraTicket> allTickets = jiraService.getTickets(PROJECT_NAME);
             List<RevCommit> bugCommits = gitService.getCommitsFromTickets(getTicketKeys(allTickets), PROJECT_NAME);
 
-            // --- 2. LOGICA DI BUSINESS ---
+            // Inizializza i servizi di logica DOPO aver raccolto i dati grezzi
             BugginessLogic bugginessLogic = new BugginessLogic(allTickets, allReleases, gitService);
-            MetricsLogic metricsLogic = new MetricsLogic(gitService.getGit());
+            MetricsLogic metricsLogic = new MetricsLogic(gitService.getGit()); // <-- IL PRE-CALCOLO PESANTE AVVIENE QUI
 
-            // --- 3. PREPARAZIONE PER WALK-FORWARD ---
-            List<Release> releasesForAnalysis = filterReleasesForSnoring(allReleases);
+            // --- 2. ANALISI PER LE RELEASE FILTRATE ---
+            JavaParserUtil javaParserUtil = new JavaParserUtil();
+            List<Release> consideredReleases = filterReleases(allReleases);
+            System.out.printf("Analizzeremo %d release (le prime 34%%) su %d totali.%n",
+                    consideredReleases.size(), allReleases.size());
 
-            for (int i = 2; i < releasesForAnalysis.size(); i++) {
-                List<Release> trainingReleases = releasesForAnalysis.subList(0, i);
-                Release testingRelease = releasesForAnalysis.get(i);
+            try (CsvWriterService csvWriter = new CsvWriterService(OUTPUT_CSV_PATH)) {
+                for (Release release : consideredReleases) {
+                    System.out.printf("%n--- Processando Release: %s ---%n", release.getName());
 
-                String outputCsvPath = String.format("./%s_run_%d.csv", PROJECT_NAME.toLowerCase(), i - 1);
-                System.out.printf("%n--- RUN %d: Training su %d releases, Testing su %s ---%n",
-                        i - 1, trainingReleases.size(), testingRelease.getName());
+                    List<String> javaFiles = gitService.findJavaFilesInRelease(release);
+                    System.out.println("Analisi di " + javaFiles.size() + " file Java...");
 
-                try (CsvWriterService csvWriter = new CsvWriterService(outputCsvPath)) {
-                    processRelease(testingRelease, trainingReleases, bugginessLogic, metricsLogic, csvWriter, gitService, bugCommits);
+                    for (String filePath : javaFiles) {
+                        String content = gitService.getFileContent(release.getCommit(), filePath);
+                        var parsedMethods = javaParserUtil.extractMethodsWithDeclarations(content);
+
+                        for (var parsedMethod : parsedMethods) {
+                            String methodName = filePath.replace("\\", "/") + "/" + parsedMethod.methodInfo.getSignature();
+                            DataRow row = new DataRow(release.getName(), methodName);
+
+                            // Calcolo Bugginess (ora dipende dalla logica del file)
+                            boolean isBuggy = bugginessLogic.isBuggy(filePath, release);
+                            row.setBugginess(isBuggy ? "YES" : "NO");
+
+                            // Calcolo Metriche (ora è una chiamata veloce)
+                            metricsLogic.calculateMetricsForFile(row, filePath, release, bugCommits);
+
+                            csvWriter.writeDataRow(row, PROJECT_NAME);
+                        }
+                    }
                 }
             }
 
@@ -63,46 +83,20 @@ public class Main {
         System.out.println("\nProcesso completato. Tempo totale: " + (System.currentTimeMillis() - totalStartTime) + "ms");
     }
 
-    private static void processRelease(Release testingRelease, List<Release> trainingReleases,
-                                       BugginessLogic bugginessLogic, MetricsLogic metricsLogic,
-                                       CsvWriterService csvWriter, GitService gitService, List<RevCommit> bugCommits) throws Exception {
-
-        JavaParserUtil javaParserUtil = new JavaParserUtil();
-        List<String> javaFiles = gitService.findJavaFilesInRelease(testingRelease);
-
-        System.out.println("Analisi di " + javaFiles.size() + " file Java...");
-        int fileCounter = 0;
-        for (String filePath : javaFiles) {
-            fileCounter++;
-            if (fileCounter % 50 == 0) {
-                System.out.printf("  ...file %d/%d%n", fileCounter, javaFiles.size());
-            }
-
-            String content = gitService.getFileContent(testingRelease.getCommit(), filePath);
-            List<JavaParserUtil.MethodParseResult> parsedMethods = javaParserUtil.extractMethodsWithDeclarations(content);
-
-            for (var parsedMethod : parsedMethods) {
-                String methodName = filePath.replace("\\", "/") + "/" + parsedMethod.methodInfo.getSignature();
-                DataRow row = new DataRow(testingRelease.getName(), methodName);
-
-                boolean isBuggy = bugginessLogic.isBuggy(filePath, testingRelease);
-                row.setBugginess(isBuggy ? "YES" : "NO");
-
-                metricsLogic.calculateMetricsForFile(row, filePath, testingRelease, bugCommits);
-
-                csvWriter.writeDataRow(row, PROJECT_NAME);
-            }
-        }
-    }
-
     private static Set<String> getTicketKeys(List<JiraTicket> tickets) {
         Set<String> keys = new HashSet<>();
         for (JiraTicket t : tickets) keys.add(t.getKey());
         return keys;
     }
 
-    private static List<Release> filterReleasesForSnoring(List<Release> allReleases) {
-        int halfSize = (int) Math.ceil(allReleases.size() / 2.0);
-        return allReleases.subList(0, halfSize);
+    private static List<Release> filterReleases(List<Release> allReleases) {
+        if (allReleases.isEmpty()) {
+            return Collections.emptyList();
+        }
+        int countToConsider = (int) Math.ceil(allReleases.size() * 0.34);
+        if (countToConsider == 0 && !allReleases.isEmpty()) {
+            countToConsider = 1;
+        }
+        return allReleases.subList(0, countToConsider);
     }
 }
