@@ -29,6 +29,8 @@ public class GitService implements AutoCloseable {
     private final Repository repository;
     private final Git git;
 
+    public static record CommitDiffInfo(int linesAdded, int linesDeleted, List<Edit> edits) {}
+
     public GitService(Path repositoryPath) throws IOException {
         this.git = Git.open(repositoryPath.toFile());
         this.repository = git.getRepository();
@@ -162,6 +164,12 @@ public class GitService implements AutoCloseable {
         return new CommitDiffInfo(linesAdded, linesDeleted, edits);
     }
 
-    // Classe interna per contenere i risultati di un diff
-    public static record CommitDiffInfo(int linesAdded, int linesDeleted, List<Edit> edits) {}
+
+
+    @Override
+    public void close() {
+        if (this.git != null) {
+            this.git.close();
+        }
+    }
 }
