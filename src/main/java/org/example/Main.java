@@ -13,7 +13,6 @@ import org.example.services.FeatureExtractor;
 import org.example.services.GitService;
 import org.example.services.JiraService;
 import org.example.services.GitService.CommitDiffInfo;
-
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.*;
