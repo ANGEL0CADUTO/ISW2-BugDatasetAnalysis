@@ -1,0 +1,26 @@
+
+W
+java:S1141Y"5Extract this nested try block into a separate method.(¡»¢üùÿÿÿÿ8×â¦›û2
+^
+java:S1075"ARefactor your code to get this URI from a customizable parameter.(ªÑ²8¹æ¦›û2
+o
+java:S3776"RRefactor this method to reduce its Cognitive Complexity from 26 to the 15 allowed.(Çµí‘8×æ¦›û2
+L	java:S106"+Replace this use of System.out by a logger.(¼ÁÏ¡şÿÿÿÿ8İæ¦›û2
+G	java:S106""+Replace this use of System.out by a logger.(èÕÉ8åæ¦›û2
+G	java:S106*"+Replace this use of System.out by a logger.(Ú£·…8‘ç¦›û2
+G	java:S106-"+Replace this use of System.err by a logger.(Ã¦§8–ç¦›û2
+L	java:S1061"+Replace this use of System.out by a logger.(ÏáÀûüÿÿÿÿ8™ç¦›û2
+G	java:S1063"+Replace this use of System.out by a logger.(ä•ÔÄ8œç¦›û2
+G	java:S1067"+Replace this use of System.out by a logger.(‘çö¨8Ÿç¦›û2
+L	java:S1069"+Replace this use of System.out by a logger.(ğ¬‡Æüÿÿÿÿ8¢ç¦›û2
+L	java:S106B"+Replace this use of System.out by a logger.(¹ÏªÙúÿÿÿÿ8‹è¦›û2
+G	java:S106G"+Replace this use of System.out by a logger.(÷Ú•„8¥è¦›û2
+L	java:S106O"+Replace this use of System.out by a logger.(Ó–ûÿÿÿÿ8¼é¦›û2
+G	java:S106U"+Replace this use of System.out by a logger.(Å¹æâ8Áé¦›û2
+G	java:S106n"+Replace this use of System.out by a logger.(øËƒ­8Ëé¦›û2
+F	java:S106r"+Replace this use of System.err by a logger.(ğ™Ş8Íé¦›û2
+N
+java:S1481x"1Remove this unused "totalEndTime" local variable.(Ï¿8Ôé¦›û2
+L	java:S106y"+Replace this use of System.out by a logger.(ŞŸ¹°ÿÿÿÿÿ8Õé¦›û2
+L	java:S106z"+Replace this use of System.out by a logger.(¤ÅÂ•úÿÿÿÿ8×é¦›û2
+M	java:S106›"+Replace this use of System.out by a logger.(­¤©Îøÿÿÿÿ8‹ê¦›û2
