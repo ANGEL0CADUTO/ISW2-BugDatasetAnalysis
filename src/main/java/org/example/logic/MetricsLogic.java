@@ -9,9 +9,8 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.patch.FileHeader;
 import org.eclipse.jgit.patch.HunkHeader;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.util.io.DisabledOutputStream;
-import org.example.model.DataRow;
+import org.example.model.FileMetrics;
 import org.example.model.Release;
 
 import java.io.IOException;
@@ -21,8 +20,6 @@ import java.util.*;
 
 public class MetricsLogic {
 
-    // Contiene i dati di modifica per ogni file
-    // Chiave: File Path, Valore: Lista di CommitData per quel file
     private final Map<String, List<CommitData>> fileHistory;
 
     private static class CommitData {
@@ -39,10 +36,6 @@ public class MetricsLogic {
         }
     }
 
-    /**
-     * Costruttore: esegue il pre-calcolo di tutte le modifiche nella storia del repository.
-     * Questa è l'operazione pesante, eseguita una sola volta.
-     */
     public MetricsLogic(Git git) throws Exception {
         this.fileHistory = new HashMap<>();
         System.out.println("Avvio pre-calcolo delle metriche per tutti i commit (potrebbe richiedere diversi minuti)...");
@@ -61,7 +54,10 @@ public class MetricsLogic {
         System.out.println("Pre-calcolo delle metriche completato. Analizzati " + count + " commit.");
     }
 
+    // In logic/MetricsLogic.java
+
     private void analyzeCommitDiff(Repository repo, RevCommit commit) throws IOException {
+        // LA CORREZIONE È IN QUESTA RIGA:
         try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
              ObjectReader reader = repo.newObjectReader()) {
 
@@ -78,8 +74,8 @@ public class MetricsLogic {
                 FileHeader fileHeader = diffFormatter.toFileHeader(diff);
                 for (HunkHeader hunk : fileHeader.getHunks()) {
                     for (Edit edit : hunk.toEditList()) {
-                        locAddedInCommit += edit.getLengthB(); // Aggiunte
-                        churnInCommit += edit.getLengthA() + edit.getLengthB(); // Rimosse + Aggiunte
+                        locAddedInCommit += edit.getLengthB();
+                        churnInCommit += edit.getLengthA() + edit.getLengthB();
                     }
                 }
 
@@ -91,20 +87,16 @@ public class MetricsLogic {
     }
 
     /**
-     * Calcola le metriche per un file in una data release, usando i dati pre-calcolati.
-     * Questo metodo è ora molto veloce.
+     * Calcola le metriche di processo per un file in una data release, usando i dati pre-calcolati.
      */
-    public void calculateMetricsForFile(DataRow dataRow, String filePath, Release release, List<RevCommit> bugCommits) {
+    public FileMetrics calculateMetricsForFile(String filePath, Release release) {
         String normalizedPath = filePath.replace("/", "\\");
         List<CommitData> allCommitsForFile = fileHistory.get(normalizedPath);
 
         if (allCommitsForFile == null || allCommitsForFile.isEmpty()) {
-            // Se il file non ha storia, tutte le metriche di processo sono 0
-            setEmptyMetrics(dataRow);
-            return;
+            return new FileMetrics(0, Collections.emptySet(), 0, 0, 0, 0);
         }
 
-        // Filtra i commit avvenuti PRIMA della data della release
         List<CommitData> commitsBeforeRelease = new ArrayList<>();
         for(CommitData cd : allCommitsForFile) {
             if(cd.date.isBefore(release.getDate())) {
@@ -113,11 +105,9 @@ public class MetricsLogic {
         }
 
         if (commitsBeforeRelease.isEmpty()) {
-            setEmptyMetrics(dataRow);
-            return;
+            return new FileMetrics(0, Collections.emptySet(), 0, 0, 0, 0);
         }
 
-        // Calcola le metriche aggregate
         Set<String> authors = new HashSet<>();
         int totalLocAdded = 0;
         int totalChurn = 0;
@@ -132,32 +122,6 @@ public class MetricsLogic {
             if (commitData.churn > maxChurn) maxChurn = commitData.churn;
         }
 
-        int numRevisions = commitsBeforeRelease.size();
-        dataRow.setNumRevisions(numRevisions);
-        dataRow.setNumAuthors(authors.size());
-        dataRow.setLocAdded(totalLocAdded);
-        dataRow.setAvgLocAdded(numRevisions > 0 ? totalLocAdded / numRevisions : 0);
-        dataRow.setMaxLocAdded(maxLocAdded);
-        dataRow.setChurn(totalChurn);
-        dataRow.setAvgChurn(numRevisions > 0 ? totalChurn / numRevisions : 0);
-        dataRow.setMaxChurn(maxChurn);
-
-        // NFix non può essere calcolato qui senza i RevCommit, lo lasciamo a 0 per ora.
-        // Possiamo migliorarlo se necessario, ma è una feature meno critica.
-        dataRow.setNumFixes(0);
-        dataRow.setLoc(0); // Il LOC fisico del file alla release va calcolato separatamente se necessario.
-    }
-
-    private void setEmptyMetrics(DataRow row) {
-        row.setNumRevisions(0);
-        row.setNumAuthors(0);
-        row.setLocAdded(0);
-        row.setAvgLocAdded(0);
-        row.setMaxLocAdded(0);
-        row.setChurn(0);
-        row.setAvgChurn(0);
-        row.setMaxChurn(0);
-        row.setNumFixes(0);
-        row.setLoc(0);
+        return new FileMetrics(commitsBeforeRelease.size(), authors, totalLocAdded, maxLocAdded, totalChurn, maxChurn);
     }
 }
