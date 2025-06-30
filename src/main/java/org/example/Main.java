@@ -1,30 +1,31 @@
 package org.example;
 
+import com.github.javaparser.StaticJavaParser;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import org.eclipse.jgit.diff.Edit;
+import org.eclipse.jgit.revwalk.RevCommit;
 import org.example.logic.BugginessLogic;
-import org.example.logic.MetricsLogic;
-import org.example.model.DataRow;
-import org.example.model.FileMetrics;
 import org.example.model.JiraTicket;
+import org.example.model.MethodData;
 import org.example.model.Release;
 import org.example.services.CsvWriterService;
+import org.example.services.FeatureExtractor;
 import org.example.services.GitService;
 import org.example.services.JiraService;
-import org.example.services.FeatureExtractor;
-import org.eclipse.jgit.revwalk.RevCommit;
+import org.example.services.GitService.CommitDiffInfo;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 
 public class Main {
     private static final String PROJECT_NAME = "BOOKKEEPER";
     private static final String REPO_PATH_STR = "C:/Users/aroma/IdeaProjects/bookkeeper";
-    private static final String OUTPUT_CSV_PATH = "./bookkeeper_dataset_milestone1.csv";
+    private static final String OUTPUT_CSV_PATH = "./bookkeeper_methods_dataset.csv";
 
     public static void main(String[] args) {
         long totalStartTime = System.currentTimeMillis();
-        System.out.println("Avvio Processo di Estrazione (Milestone 1) per Progetto: " + PROJECT_NAME);
+        System.out.println("Avvio Processo di Estrazione a Livello di Metodo per Progetto: " + PROJECT_NAME);
 
         try (GitService gitService = new GitService(Paths.get(REPO_PATH_STR));
              JiraService jiraService = new JiraService()) {
@@ -34,9 +35,6 @@ public class Main {
             List<RevCommit> bugCommits = gitService.getCommitsFromTickets(getTicketKeys(allTickets), PROJECT_NAME);
 
             BugginessLogic bugginessLogic = new BugginessLogic(allTickets, allReleases, gitService);
-            MetricsLogic metricsLogic = new MetricsLogic(gitService.getGit());
-
-            JavaParserUtil javaParserUtil = new JavaParserUtil();
             FeatureExtractor featureExtractor = new FeatureExtractor();
 
             List<Release> consideredReleases = filterReleases(allReleases);
@@ -46,6 +44,7 @@ public class Main {
             try (CsvWriterService csvWriter = new CsvWriterService(OUTPUT_CSV_PATH)) {
                 for (Release release : consideredReleases) {
                     System.out.printf("%n--- Processando Release: %s ---%n", release.getName());
+                    long releaseStartTime = System.currentTimeMillis();
 
                     List<String> javaFiles = gitService.findJavaFilesInRelease(release);
                     System.out.println("Analisi di " + javaFiles.size() + " file Java...");
@@ -57,44 +56,78 @@ public class Main {
                             System.out.printf("  ...file %d/%d%n", fileCounter, javaFiles.size());
                         }
 
-                        // 1. CALCOLA LE METRICHE A LIVELLO DI FILE (UNA VOLTA SOLA)
-                        FileMetrics fileMetrics = metricsLogic.calculateMetricsForFile(filePath, release);
-
+                        List<RevCommit> fileHistory = gitService.getCommitsTouchingFile(filePath, release.getCommit());
                         String content = gitService.getFileContent(release.getCommit(), filePath);
-                        var parsedMethods = javaParserUtil.extractMethodsWithDeclarations(content);
+                        var cu = StaticJavaParser.parse(content);
+                        List<MethodDeclaration> methods = cu.findAll(MethodDeclaration.class);
 
-                        for (var parsedMethod : parsedMethods) {
-                            String methodName = filePath.replace("\\", "/") + "/" + parsedMethod.methodInfo.getSignature();
-                            DataRow row = new DataRow(release.getName(), methodName);
+                        for (MethodDeclaration methodNode : methods) {
+                            String signature = methodNode.getSignature().asString();
+                            String methodIdentifier = filePath.replace("\\", "/") + "/" + signature;
+                            MethodData row = new MethodData(release.getName(), methodIdentifier);
 
-                            // 2. IMPOSTA LA BUGGINESS
-                            boolean isBuggy = bugginessLogic.isBuggy(filePath, release);
-                            row.setBugginess(isBuggy ? "YES" : "NO");
+                            calculateMethodProcessMetrics(row, methodNode, fileHistory, gitService, filePath);
 
-                            // 3. IMPOSTA LE METRICHE DI FILE
-                            row.setNumRevisions(fileMetrics.getNumRevisions());
-                            row.setNumAuthors(fileMetrics.getNumAuthors());
-                            row.setLocAdded(fileMetrics.getLocAdded());
-                            row.setAvgLocAdded(fileMetrics.getAvgLocAdded());
-                            row.setMaxLocAdded(fileMetrics.getMaxLocAdded());
-                            row.setChurn(fileMetrics.getChurn());
-                            row.setAvgChurn(fileMetrics.getAvgChurn());
-                            row.setMaxChurn(fileMetrics.getMaxChurn());
+                            row.setLoc(featureExtractor.calculateLOC(methodNode));
+                            row.setCyclomaticComplexity(featureExtractor.calculateCyclomaticComplexity(methodNode));
 
-                            // 4. CALCOLA E IMPOSTA LE METRICHE DI METODO
-                            row.setLoc(featureExtractor.calculateLOC(parsedMethod.methodInfo));
-                            // Aggiungi qui altre metriche a livello di metodo
-                            // row.setCyclomaticComplexity(featureExtractor.calculateCyclomaticComplexity(parsedMethod.methodDeclaration));
+                            row.setBugginess(bugginessLogic.isBuggy(filePath, release) ? "YES" : "NO");
 
                             csvWriter.writeDataRow(row, PROJECT_NAME);
                         }
                     }
+                    System.out.printf("--- Fine Processamento Release: %s. Tempo: %dms ---%n", release.getName(), (System.currentTimeMillis() - releaseStartTime));
                 }
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
         System.out.println("\nProcesso completato. Tempo totale: " + (System.currentTimeMillis() - totalStartTime) + "ms");
+    }
+
+    private static void calculateMethodProcessMetrics(MethodData row, MethodDeclaration methodNode,
+                                                      List<RevCommit> fileHistory, GitService gitService, String filePath) throws IOException {
+
+        int methodStartLine = methodNode.getBegin().map(p -> p.line).orElse(0);
+        int methodEndLine = methodNode.getEnd().map(p -> p.line).orElse(0);
+
+        if (methodStartLine == 0) return;
+
+        Set<String> authors = new HashSet<>();
+        int stmtAdded = 0;
+        int maxStmtAdded = 0;
+        int churn = 0;
+        int methodHistories = 0;
+
+        for (RevCommit commit : fileHistory) {
+            CommitDiffInfo diffInfo = gitService.getCommitDiff(commit, filePath);
+            boolean methodWasTouched = false;
+
+            for (Edit edit : diffInfo.edits()) {
+                int editStartInNewFile = edit.getBeginB();
+                int editEndInNewFile = edit.getEndB();
+
+                if (methodStartLine <= editEndInNewFile && methodEndLine >= editStartInNewFile) {
+                    methodWasTouched = true;
+                    int addedInEdit = edit.getLengthB();
+                    stmtAdded += addedInEdit;
+                    if (addedInEdit > maxStmtAdded) maxStmtAdded = addedInEdit;
+                    churn += edit.getLengthA() + edit.getLengthB();
+                }
+            }
+
+            if (methodWasTouched) {
+                methodHistories++;
+                authors.add(commit.getAuthorIdent().getEmailAddress());
+            }
+        }
+
+        row.setMethodHistories(methodHistories);
+        row.setNumAuthors(authors.size());
+        row.setStmtAdded(stmtAdded);
+        row.setMaxStmtAdded(maxStmtAdded);
+        row.setAvgStmtAdded(methodHistories > 0 ? stmtAdded / methodHistories : 0);
+        row.setChurn(churn);
     }
 
     private static Set<String> getTicketKeys(List<JiraTicket> tickets) {
@@ -104,13 +137,8 @@ public class Main {
     }
 
     private static List<Release> filterReleases(List<Release> allReleases) {
-        if (allReleases.isEmpty()) {
-            return Collections.emptyList();
-        }
+        if (allReleases.isEmpty()) return Collections.emptyList();
         int countToConsider = (int) Math.ceil(allReleases.size() * 0.34);
-        if (countToConsider == 0 && !allReleases.isEmpty()) {
-            countToConsider = 1;
-        }
-        return allReleases.subList(0, countToConsider);
+        return allReleases.subList(0, Math.min(countToConsider, allReleases.size()));
     }
 }

@@ -11,8 +11,9 @@ public class FileMetrics {
     private final int churn;
     private final int maxChurn;
     private final int avgChurn;
+    private final int numFixes;
 
-    public FileMetrics(int numRevisions, Set<String> authors, int totalLocAdded, int maxLocAdded, int totalChurn, int maxChurn) {
+    public FileMetrics(int numRevisions, Set<String> authors, int totalLocAdded, int maxLocAdded, int totalChurn, int maxChurn,int numFixes) {
         this.numRevisions = numRevisions;
         this.numAuthors = authors.size();
         this.locAdded = totalLocAdded;
@@ -21,9 +22,11 @@ public class FileMetrics {
         this.churn = totalChurn;
         this.maxChurn = maxChurn;
         this.avgChurn = numRevisions > 0 ? totalChurn / numRevisions : 0;
+        this.numFixes = numFixes;
     }
 
     // Getters
+    public int getNumFixes() { return numFixes; }
     public int getNumRevisions() { return numRevisions; }
     public int getNumAuthors() { return numAuthors; }
     public int getLocAdded() { return locAdded; }

@@ -4,11 +4,13 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.diff.DiffFormatter;
+import org.eclipse.jgit.diff.Edit;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.patch.FileHeader;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
@@ -119,32 +121,47 @@ public class GitService implements AutoCloseable {
     }
 
     /**
-     * Per un dato commit, restituisce la lista dei path dei file modificati.
+     * Restituisce la lista di tutti i commit che hanno toccato un file fino a una certa release.
      */
-    public List<String> getTouchedFiles(RevCommit commit) throws IOException {
-        List<String> touchedFiles = new ArrayList<>();
-        if (commit.getParentCount() == 0) return touchedFiles;
+    public List<RevCommit> getCommitsTouchingFile(String filePath, RevCommit releaseCommit) throws Exception {
+        List<RevCommit> commits = new ArrayList<>();
+        git.log().add(releaseCommit.getId()).addPath(filePath).call().forEach(commits::add);
+        Collections.reverse(commits);
+        return commits;
+    }
+
+    /**
+     * Analizza il diff di un commit per un file specifico e restituisce le linee modificate.
+     */
+    public CommitDiffInfo getCommitDiff(RevCommit commit, String filePath) throws IOException {
+        int linesAdded = 0;
+        int linesDeleted = 0;
+        List<Edit> edits = new ArrayList<>();
+
+        if (commit.getParentCount() == 0) return new CommitDiffInfo(0, 0, edits);
 
         try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
              ObjectReader reader = repository.newObjectReader()) {
 
-            RevCommit parent = new RevWalk(repository).parseCommit(commit.getParent(0).getId());
+            RevCommit parent = commit.getParent(0);
             diffFormatter.setRepository(repository);
-
             List<DiffEntry> diffs = diffFormatter.scan(parent.getTree(), commit.getTree());
+
             for (DiffEntry diff : diffs) {
-                if (diff.getChangeType() == DiffEntry.ChangeType.ADD || diff.getChangeType() == DiffEntry.ChangeType.MODIFY) {
-                    touchedFiles.add(diff.getNewPath());
+                if (diff.getNewPath().equals(filePath) || diff.getOldPath().equals(filePath)) {
+                    FileHeader fileHeader = diffFormatter.toFileHeader(diff);
+                    edits.addAll(fileHeader.toEditList());
+                    for (Edit edit : edits) {
+                        linesDeleted += edit.getLengthA();
+                        linesAdded += edit.getLengthB();
+                    }
+                    break;
                 }
             }
         }
-        return touchedFiles;
+        return new CommitDiffInfo(linesAdded, linesDeleted, edits);
     }
 
-    @Override
-    public void close() {
-        if (this.git != null) {
-            this.git.close();
-        }
-    }
+    // Classe interna per contenere i risultati di un diff
+    public static record CommitDiffInfo(int linesAdded, int linesDeleted, List<Edit> edits) {}
 }
