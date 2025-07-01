@@ -1,93 +1,126 @@
+// in src/main/java/org/example/Main.java
 package org.example;
 
+import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevWalk;
 import org.example.logic.BugginessLogic;
 import org.example.logic.HistoryAnalyzer;
-import org.example.model.JiraTicket;
-import org.example.model.MethodData;
-import org.example.model.MethodHistory;
-import org.example.model.MethodMetrics;
-import org.example.model.Release;
+import org.example.logic.MetricsLogic;
+import org.example.model.*; // Importa tutto dal model
 import org.example.services.CsvWriterService;
 import org.example.services.GitService;
 import org.example.services.JiraService;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 
 public class Main {
+
     private static final String PROJECT_NAME = "BOOKKEEPER";
     private static final String REPO_PATH_STR = "C:/Users/aroma/IdeaProjects/bookkeeper";
-    private static final String OUTPUT_CSV_PATH = "./bookkeeper_dataset_final.csv";
+    private static final String OUTPUT_CSV_PATH = "./bookkeeper_milestone1.csv";
 
     public static void main(String[] args) {
+        Main main = new Main();
+        main.run();
+    }
+
+    public void run() {
         long totalStartTime = System.currentTimeMillis();
-        System.out.println("Avvio Processo di Estrazione per Progetto: " + PROJECT_NAME);
+        System.out.println("Avvio generazione dataset per il progetto: " + PROJECT_NAME);
 
-        try (GitService gitService = new GitService(Paths.get(REPO_PATH_STR));
-             JiraService jiraService = new JiraService()) {
+        GitService gitService = null;
+        JiraService jiraService = new JiraService();
+        CsvWriterService csvWriter = null;
 
-            // --- 1. RACCOLTA DATI E ANALISI STORICA ---
-            List<Release> allReleases = gitService.getReleases();
-            List<JiraTicket> allTickets = jiraService.getTickets(PROJECT_NAME);
-            List<RevCommit> bugCommits = gitService.getCommitsFromTickets(getTicketKeys(allTickets), PROJECT_NAME);
+        try {
+            Path repoPath = Paths.get(REPO_PATH_STR);
+            gitService = new GitService(repoPath);
+            csvWriter = new CsvWriterService(OUTPUT_CSV_PATH);
 
-            // Il pre-calcolo pesante avviene qui
-            HistoryAnalyzer historyAnalyzer = new HistoryAnalyzer(gitService, allReleases, bugCommits);
+            csvWriter.writeHeader("ProjectName", "MethodID", "ReleaseID", "Bugginess",
+                    "LOC", "CC", "ParamCount", "NestingDepth", "NSmells",
+                    "NR", "NAuth", "Churn", "MaxChurn", "AvgChurn");
 
-            BugginessLogic bugginessLogic = new BugginessLogic(allTickets, allReleases, gitService);
+            // --- FASE 1: PRE-CALCOLO GLOBALE ---
 
-            // --- 2. GENERAZIONE DATASET ---
-            List<Release> consideredReleases = filterReleases(allReleases);
-            System.out.printf("Generazione dataset per %d release (le prime 34%%).%n", consideredReleases.size());
+            // 1.1 Recupera le release da Git (serve per mappare le date ai ticket)
+            List<Release> releases = getReleases(gitService);
 
-            try (CsvWriterService csvWriter = new CsvWriterService(OUTPUT_CSV_PATH)) {
-                for (Release release : consideredReleases) {
-                    System.out.println("Processando release: " + release.getName());
+            // 1.2 Recupera i ticket da Jira
+            List<JiraTicket> tickets = jiraService.getFixedBugTickets(PROJECT_NAME);
 
-                    for (MethodHistory methodHistory : historyAnalyzer.methodHistories.values()) {
-                        MethodMetrics metrics = methodHistory.metricsPerRelease.get(release.getName());
+            // 1.3 Calcola IV, OV, FV per ogni ticket usando Proportion
+            BugginessLogic bugginessLogic = new BugginessLogic(releases);
+            bugginessLogic.calculateBugLifecycles(tickets);
 
-                        // Considera solo i metodi che esistono in questa release
-                        if (metrics == null) continue;
+            // 1.4 Linka i ticket ai commit e costruisci la storia dei metodi
+            Map<String, RevCommit> bugCommits = gitService.linkBugsToCommitsFromTickets(tickets);
+            HistoryAnalyzer historyAnalyzer = new HistoryAnalyzer(gitService);
+            Map<String, MethodHistory> methodsHistories = historyAnalyzer.buildMethodsHistories(bugCommits);
 
-                        String methodIdentifier = methodHistory.file.replace("\\", "/") + "/" + methodHistory.signature;
-                        MethodData row = new MethodData(release.getName(), methodIdentifier);
+            // --- FASE 2: ANALISI PER RELEASE E CREAZIONE CSV ---
+            MetricsLogic metricsLogic = new MetricsLogic();
+            List<Release> consideredReleases = filterReleases(releases);
 
-                        populateRowWithMetrics(row, metrics, methodHistory.authors.size());
-                        row.setBugginess(bugginessLogic.isBuggy(methodHistory.file, release) ? "YES" : "NO");
+            System.out.println("Inizio analisi per release e generazione CSV...");
 
-                        csvWriter.writeDataRow(row, PROJECT_NAME);
-                    }
+            for (int i = 0; i < consideredReleases.size(); i++) {
+                Release currentRelease = consideredReleases.get(i);
+                System.out.printf("\n--- Processando release %d/%d: %s ---\n", (i + 1), consideredReleases.size(), currentRelease.getName());
+
+                Map<String, MethodData> methodsInRelease = gitService.getMethodsInRelease(currentRelease.getCommit());
+                System.out.println("Trovati " + methodsInRelease.size() + " metodi nella release.");
+
+                for (MethodData methodData : methodsInRelease.values()) {
+                    MethodHistory history = methodsHistories.get(methodData.getUniqueID());
+                    if (history == null || history.getMethodHistories() == 0) continue;
+
+                    // Calcola le metriche
+                    MethodMetrics metrics = metricsLogic.calculateMetrics(methodData, history);
+
+                    // Calcola la Bugginess (con la logica Post-Release)
+                    boolean isBuggy = bugginessLogic.isMethodBuggyInRelease(history, currentRelease);
+                    String bugginess = isBuggy ? "yes" : "no";
+
+                    // Scrivi la riga
+                    csvWriter.writeDataRow(PROJECT_NAME, methodData.getUniqueID(), currentRelease.getName(), bugginess, metrics.toList());
                 }
             }
+
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            if (gitService != null) gitService.close();
+            if (csvWriter != null) try { csvWriter.close(); } catch (IOException e) { e.printStackTrace(); }
+            System.out.println("\nEsecuzione terminata. Tempo totale: " + (System.currentTimeMillis() - totalStartTime) + "ms");
+            System.out.println("Dataset salvato in: " + new File(OUTPUT_CSV_PATH).getAbsolutePath());
         }
-        System.out.println("\nProcesso completato. Tempo totale: " + (System.currentTimeMillis() - totalStartTime) + "ms");
     }
 
-    private static void populateRowWithMetrics(MethodData row, MethodMetrics metrics, int numAuthors) {
-        row.setLoc(metrics.loc);
-        row.setCyclomaticComplexity(metrics.cyclomaticComplexity);
-        row.setNumRevisions(metrics.numRevisions);
-        row.setNumAuthors(numAuthors);
-        row.setStmtAdded(metrics.locAdded);
-        row.setMaxStmtAdded(metrics.maxLocAdded);
-        row.setAvgStmtAdded(metrics.numRevisions > 0 ? metrics.locAdded / metrics.numRevisions : 0);
-        row.setChurn(metrics.churn);
+    private List<Release> getReleases(GitService gitService) throws IOException {
+        List<Release> releases = new ArrayList<>();
+        List<Ref> tags = gitService.getAllReleasesSortedByDate();
+        int index = 0;
+        try (RevWalk revWalk = new RevWalk(gitService.repository)) {
+            for (Ref tag : tags) {
+                String tagName = tag.getName().replace("refs/tags/", "");
+                RevCommit commit = revWalk.parseCommit(tag.getObjectId());
+                releases.add(new Release(tagName, commit, index++));
+            }
+        }
+        System.out.println("Trovate e ordinate " + releases.size() + " release.");
+        return releases;
     }
 
-    private static Set<String> getTicketKeys(List<JiraTicket> tickets) {
-        Set<String> keys = new HashSet<>();
-        for (JiraTicket t : tickets) keys.add(t.getKey());
-        return keys;
-    }
-
-    private static List<Release> filterReleases(List<Release> allReleases) {
-        if (allReleases.isEmpty()) return Collections.emptyList();
+    private List<Release> filterReleases(List<Release> allReleases) {
+        // Le specifiche dicono "ignore the last 66%", che significa prendere il primo 34%
         int countToConsider = (int) Math.ceil(allReleases.size() * 0.34);
+        System.out.println("Considereremo le prime " + countToConsider + " release.");
         return allReleases.subList(0, Math.min(countToConsider, allReleases.size()));
     }
 }

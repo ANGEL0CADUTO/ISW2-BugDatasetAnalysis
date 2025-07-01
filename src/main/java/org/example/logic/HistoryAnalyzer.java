@@ -1,136 +1,136 @@
+// in src/main/java/org/example/logic/HistoryAnalyzer.java
 package org.example.logic;
 
-import com.github.javaparser.StaticJavaParser;
+import com.github.difflib.DiffUtils;
+import com.github.difflib.patch.AbstractDelta;
+import com.github.difflib.patch.Patch;
 import com.github.javaparser.ast.body.MethodDeclaration;
-import org.eclipse.jgit.api.Git;
-import org.eclipse.jgit.diff.Edit;
+import com.github.javaparser.ast.stmt.Statement;
+import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.revwalk.RevCommit;
+import org.example.model.MethodData;
 import org.example.model.MethodHistory;
-import org.example.model.MethodMetrics;
-import org.example.model.Release;
-import org.example.services.FeatureExtractor;
 import org.example.services.GitService;
-import org.example.services.GitService.CommitDiffInfo;
+import org.example.services.JavaParserUtil;
 
+import java.io.IOException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class HistoryAnalyzer {
 
     private final GitService gitService;
-    private final List<Release> releases;
-    private final Set<String> bugCommitHashes;
-    private final FeatureExtractor featureExtractor;
-    public final Map<String, MethodHistory> methodHistories = new HashMap<>(); // Key: "filepath/signature"
+    private final JavaParserUtil javaParserUtil;
 
-    public HistoryAnalyzer(GitService gitService, List<Release> releases, List<RevCommit> bugCommits) throws Exception {
+    public HistoryAnalyzer(GitService gitService) {
         this.gitService = gitService;
-        this.releases = releases;
-        this.bugCommitHashes = new HashSet<>();
-        for (RevCommit bc : bugCommits) {
-            this.bugCommitHashes.add(bc.getName());
-        }
-        this.featureExtractor = new FeatureExtractor();
-
-        processRepositoryHistory();
+        this.javaParserUtil = new JavaParserUtil();
     }
 
-    private void processRepositoryHistory() throws Exception {
-        System.out.println("Avvio analisi single-pass della storia del repository...");
-        List<RevCommit> allCommits = new ArrayList<>();
-        gitService.getGit().log().all().call().forEach(allCommits::add);
-        Collections.reverse(allCommits); // Ordina dal più vecchio al più nuovo
+    public Map<String, MethodHistory> buildMethodsHistories(Map<String, RevCommit> bugCommits)
+            throws GitAPIException, IOException {
 
-        int count = 0;
+        System.out.println("Inizio costruzione della storia dei metodi. Questo è il passo più lungo...");
+
+        Map<String, MethodHistory> histories = new HashMap<>();
+        Iterable<RevCommit> allCommits = gitService.getAllCommits();
+
+        int commitCount = 0;
         for (RevCommit commit : allCommits) {
-            count++;
-            if (count % 200 == 0) {
-                System.out.printf("  ...analizzato commit %d/%d%n", count, allCommits.size());
+            commitCount++;
+            if (commitCount % 1000 == 0) {
+                System.out.printf("Analisi commit %d...%n", commitCount);
             }
-            if (commit.getParentCount() == 0) continue;
+            if (commit.getParentCount() == 0) continue; // Salta il primo commit
 
-            List<String> touchedFiles = gitService.getTouchedFiles(commit);
-            for (String filePath : touchedFiles) {
-                if (!filePath.endsWith(".java")) continue;
+            List<DiffEntry> diffs = gitService.getChangedFilesInCommit(commit);
+            for (DiffEntry diff : diffs) {
+                String newPath = diff.getNewPath();
+                if (!newPath.endsWith(".java")) continue;
 
-                CommitDiffInfo diffInfo = gitService.getCommitDiff(commit, filePath);
-                String oldContent = "";
-                try {
-                    oldContent = gitService.getFileContent(commit.getParent(0), filePath);
-                } catch (Exception e) { /* File non esisteva prima (ADD) */ }
+                Map<String, MethodData> methodsBefore = getMethodsFromFile(commit.getParent(0), diff.getOldPath());
+                Map<String, MethodData> methodsAfter = getMethodsFromFile(commit, newPath);
 
-                String newContent = gitService.getFileContent(commit, filePath);
-
-                List<MethodDeclaration> oldMethods = StaticJavaParser.parse(oldContent).findAll(MethodDeclaration.class);
-                List<MethodDeclaration> newMethods = StaticJavaParser.parse(newContent).findAll(MethodDeclaration.class);
-
-                updateMetricsForFile(filePath, commit, diffInfo, oldMethods, newMethods);
+                compareMethodVersions(methodsBefore, methodsAfter, commit, histories);
             }
-        }
-        System.out.println("Analisi della storia completata.");
-    }
 
-    private void updateMetricsForFile(String filePath, RevCommit commit, CommitDiffInfo diffInfo, List<MethodDeclaration> oldMethods, List<MethodDeclaration> newMethods) {
-        for (MethodDeclaration newMethod : newMethods) {
-            String signature = newMethod.getSignature().asString();
-            String methodKey = filePath.replace("\\", "/") + "/" + signature;
-
-            MethodHistory history = methodHistories.computeIfAbsent(methodKey, k -> new MethodHistory(filePath, signature));
-
-            // Trova la release corrente
-            Release currentRelease = findReleaseForCommit(commit);
-            if (currentRelease == null) continue; // Commit non appartiene a nessuna release
-
-            MethodMetrics metrics = history.metricsPerRelease.computeIfAbsent(currentRelease.getName(), k -> new MethodMetrics());
-
-            // Aggiorna metriche statiche per la release corrente
-            metrics.loc = featureExtractor.calculateLOC(newMethod);
-            metrics.cyclomaticComplexity = featureExtractor.calculateCyclomaticComplexity(newMethod);
-
-            // Aggiorna metriche di processo
-            boolean wasModified = wasMethodModified(newMethod, oldMethods, diffInfo.edits());
-            if (wasModified) {
-                history.authors.add(commit.getAuthorIdent().getEmailAddress());
-                int churn = diffInfo.linesAdded() + diffInfo.linesDeleted();
-
-                metrics.numRevisions += 1;
-                metrics.locAdded += diffInfo.linesAdded();
-                if (diffInfo.linesAdded() > metrics.maxLocAdded) {
-                    metrics.maxLocAdded = diffInfo.linesAdded();
-                }
-                metrics.churn += churn;
-                if (churn > metrics.maxChurn) {
-                    metrics.maxChurn = churn;
+            // Associa il bug fix ai metodi che esistevano in questo commit
+            if (bugCommits.containsKey(commit.getName())) {
+                for (DiffEntry diff : diffs) {
+                    if(diff.getNewPath().endsWith(".java")) {
+                        Map<String, MethodData> methodsInCommit = getMethodsFromFile(commit, diff.getNewPath());
+                        for(String methodId : methodsInCommit.keySet()) {
+                            histories.computeIfAbsent(methodId, MethodHistory::new).addBugFixCommit(commit);
+                        }
+                    }
                 }
             }
-            if (bugCommitHashes.contains(commit.getName())) {
-                metrics.numFixes += 1;
+        }
+        System.out.println("Analisi storica completata. Trovate le storie di " + histories.size() + " metodi unici.");
+        return histories;
+    }
+
+    private Map<String, MethodData> getMethodsFromFile(RevCommit commit, String filePath) throws IOException {
+        Map<String, MethodData> methods = new HashMap<>();
+        if (commit == null || filePath.equals("/dev/null")) return methods;
+
+        String fileContent = gitService.getFileContent(commit, filePath);
+        if(fileContent.isEmpty()) return methods;
+
+        List<JavaParserUtil.MethodParseResult> parsedMethods = javaParserUtil.extractMethodsWithDeclarations(fileContent);
+        for (JavaParserUtil.MethodParseResult parsed : parsedMethods) {
+            String uniqueID = filePath.replace("\\", "/") + "/" + parsed.methodInfo.getSignature();
+            methods.put(uniqueID, new MethodData(uniqueID, commit, parsed.methodDeclaration, fileContent));
+        }
+        return methods;
+    }
+
+    private void compareMethodVersions(Map<String, MethodData> before, Map<String, MethodData> after, RevCommit currentCommit, Map<String, MethodHistory> histories) {
+        // Metodi modificati o cancellati
+        for (MethodData methodBefore : before.values()) {
+            MethodData methodAfter = after.get(methodBefore.getUniqueID());
+
+            if (methodAfter != null) { // Il metodo esiste ancora
+                List<String> stmtsBefore = getStatementsAsString(methodBefore.getDeclaration());
+                List<String> stmtsAfter = getStatementsAsString(methodAfter.getDeclaration());
+
+                if (!stmtsBefore.equals(stmtsAfter)) { // Il metodo è stato modificato
+                    Patch<String> patch = DiffUtils.diff(stmtsBefore, stmtsAfter);
+                    int added = 0;
+                    int deleted = 0;
+                    for (AbstractDelta<String> delta : patch.getDeltas()) {
+                        switch (delta.getType()) {
+                            case INSERT: added += delta.getTarget().getLines().size(); break;
+                            case DELETE: deleted += delta.getSource().getLines().size(); break;
+                            case CHANGE:
+                                added += delta.getTarget().getLines().size();
+                                deleted += delta.getSource().getLines().size();
+                                break;
+                            default: break;
+                        }
+                    }
+                    histories.computeIfAbsent(methodBefore.getUniqueID(), MethodHistory::new).addVersion(methodAfter, added, deleted);
+                }
+            }
+        }
+        // Metodi aggiunti
+        for (MethodData methodAfter : after.values()) {
+            if (!before.containsKey(methodAfter.getUniqueID())) {
+                int stmtsAdded = countStatements(methodAfter.getDeclaration());
+                histories.computeIfAbsent(methodAfter.getUniqueID(), MethodHistory::new).addVersion(methodAfter, stmtsAdded, 0);
             }
         }
     }
 
-    private boolean wasMethodModified(MethodDeclaration method, List<MethodDeclaration> oldMethods, List<Edit> edits) {
-        // Criterio 1: il metodo non esisteva prima (nuovo metodo)
-        if (oldMethods.stream().noneMatch(old -> old.getSignature().asString().equals(method.getSignature().asString()))) {
-            return true;
-        }
-
-        // Criterio 2: le linee del metodo si sovrappongono a un "hunk" di modifica
-        int start = method.getBegin().get().line;
-        int end = method.getEnd().get().line;
-        for (Edit edit : edits) {
-            if (Math.max(start, edit.getBeginB()) <= Math.min(end, edit.getEndB())) {
-                return true;
-            }
-        }
-        return false;
+    private List<String> getStatementsAsString(MethodDeclaration md) {
+        if (!md.getBody().isPresent()) return Collections.emptyList();
+        return md.getBody().get().getStatements().stream()
+                .map(Statement::toString)
+                .collect(Collectors.toList());
     }
 
-    private Release findReleaseForCommit(RevCommit commit) {
-        for (int i = releases.size() - 1; i >= 0; i--) {
-            if (commit.getCommitTime() <= releases.get(i).getCommit().getCommitTime()) {
-                return releases.get(i);
-            }
-        }
-        return null;
+    private int countStatements(MethodDeclaration md) {
+        return md.getBody().map(body -> body.getStatements().size()).orElse(0);
     }
 }

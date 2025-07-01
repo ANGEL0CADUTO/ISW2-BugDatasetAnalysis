@@ -1,195 +1,150 @@
+// in src/main/java/org/example/logic/BugginessLogic.java
 package org.example.logic;
 
-import org.eclipse.jgit.api.errors.GitAPIException;
-import org.eclipse.jgit.revwalk.RevCommit;
 import org.example.model.JiraTicket;
 import org.example.model.Release;
-import org.example.services.GitService;
-
-import java.io.IOException;
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
 
 public class BugginessLogic {
-
-    private final List<JiraTicket> tickets;
     private final List<Release> releases;
-    private final Map<String, List<String>> commitTouchedFiles; // Mappa: commitHash -> lista di file toccati
-    private final Map<String, List<String>> fileBuggyCycles; // Mappa: pathFile -> lista di "IV-FV"
 
-    public BugginessLogic(List<JiraTicket> tickets, List<Release> releases, GitService gitService) throws IOException {
-        this.tickets = tickets;
+    public BugginessLogic(List<Release> releases) {
         this.releases = releases;
-        this.commitTouchedFiles = new HashMap<>();
-        this.fileBuggyCycles = new HashMap<>();
-
-        // Esegui la logica principale al momento della costruzione
-        determineBugCycles(gitService);
     }
 
     /**
-     * Metodo principale che orchestra il calcolo del ciclo di vita dei bug.
+     * Metodo principale che orchestra il calcolo del ciclo di vita dei bug usando Proportion.
      */
-    private void determineBugCycles(GitService gitService) throws IOException {
-        System.out.println("Avvio calcolo del ciclo di vita dei bug (IV, OV, FV)...");
+    public void calculateBugLifecycles(List<JiraTicket> tickets) {
+        System.out.println("Avvio calcolo del ciclo di vita dei bug (IV, OV, FV) con Proportion...");
         List<JiraTicket> ticketsWithKnownIV = new ArrayList<>();
         List<JiraTicket> ticketsWithUnknownIV = new ArrayList<>();
 
-        // 1. Determina OV e FV e separa i ticket con e senza IV
+        // 1. Determina OV, FV e IV (se possibile) per ogni ticket
         for (JiraTicket ticket : tickets) {
-            findOpeningAndFixedVersions(ticket);
-            if (ticket.getOpeningVersion() == null || ticket.getFixedVersion() == null) continue;
-
-            findInjectedVersionFromAffected(ticket);
-            if (ticket.getInjectedVersion() != null) {
-                ticketsWithKnownIV.add(ticket);
-            } else {
-                ticketsWithUnknownIV.add(ticket);
+            setOpeningAndFixedVersions(ticket);
+            // Processa solo ticket per cui possiamo trovare OV e FV
+            if (ticket.getOpeningVersion() != null && ticket.getFixedVersion() != null) {
+                setInjectedVersionFromAffected(ticket); // Prova a trovare IV dal campo "Affected Versions"
+                if (ticket.getInjectedVersion() != null) {
+                    ticketsWithKnownIV.add(ticket);
+                } else {
+                    ticketsWithUnknownIV.add(ticket);
+                }
             }
         }
+        System.out.println("Trovati " + ticketsWithKnownIV.size() + " ticket con IV nota e " + ticketsWithUnknownIV.size() + " con IV da stimare.");
 
         // 2. Calcola P (proportion) e stima gli IV mancanti
         double p = calculateProportion(ticketsWithKnownIV);
+        System.out.println("Valore di Proportion (p) calcolato: " + p);
         estimateMissingIVs(ticketsWithUnknownIV, p);
 
-        // 3. Popola la mappa file -> cicli di vita dei bug
-        populateFileBuggyCycles(gitService);
         System.out.println("Calcolo del ciclo di vita dei bug completato.");
     }
 
-    /**
-     * Controlla se un file era "buggy" in una data release.
-     */
-    public boolean isBuggy(String filePath, Release currentRelease) {
-        List<String> cycles = fileBuggyCycles.get(filePath.replace("/", "\\"));
-        if (cycles == null) return false;
-
-        for (String cycle : cycles) {
-            String[] parts = cycle.split("-");
-            int ivIndex = Integer.parseInt(parts[0]);
-            int fvIndex = Integer.parseInt(parts[1]);
-            int currentIndex = releases.indexOf(currentRelease);
-
-            // Regola: IV <= v < FV
-            if (currentIndex >= ivIndex && currentIndex < fvIndex) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // --- Metodi Helper ---
-
-    private void findOpeningAndFixedVersions(JiraTicket ticket) {
+    private void setOpeningAndFixedVersions(JiraTicket ticket) {
+        // La OV è la prima release dopo la data di creazione del ticket
         ticket.setOpeningVersion(findReleaseByDate(ticket.getCreationDate()));
+        // La FV è la prima release dopo la data di risoluzione del ticket
         ticket.setFixedVersion(findReleaseByDate(ticket.getResolutionDate()));
     }
 
     private Release findReleaseByDate(LocalDateTime date) {
-        // Trova la prima release la cui data è *dopo* la data specificata
-        for (Release release : releases) {
-            if (release.getDate().isAfter(date)) {
-                return release;
-            }
-        }
-        return null; // Nessuna release trovata dopo quella data
+        if (date == null) return null;
+        return releases.stream()
+                .filter(r -> r.getDate().isAfter(date))
+                .findFirst()
+                .orElse(null);
     }
 
-    private void findInjectedVersionFromAffected(JiraTicket ticket) {
-        if (ticket.getAffectedVersions().isEmpty()) return;
+    private void setInjectedVersionFromAffected(JiraTicket ticket) {
+        if (ticket.getAffectedVersionsStrings().isEmpty()) return;
 
-        Release earliestIV = null;
-        for (String avName : ticket.getAffectedVersions()) {
-            for (Release release : releases) {
-                if (release.getName().equals(avName)) {
-                    if (earliestIV == null || release.getDate().isBefore(earliestIV.getDate())) {
-                        earliestIV = release;
-                    }
-                    break;
-                }
-            }
-        }
-        ticket.setInjectedVersion(earliestIV);
+        // Trova la release più vecchia tra quelle listate in "Affected Versions"
+        ticket.getAffectedVersionsStrings().stream()
+                .map(this::findReleaseByName)
+                .filter(java.util.Objects::nonNull)
+                .min(Comparator.comparing(Release::getDate))
+                .ifPresent(ticket::setInjectedVersion);
+    }
+
+    private Release findReleaseByName(String name) {
+        return releases.stream()
+                .filter(r -> r.getName().equals(name))
+                .findFirst()
+                .orElse(null);
     }
 
     private double calculateProportion(List<JiraTicket> ticketsWithKnownIV) {
         if (ticketsWithKnownIV.isEmpty()) {
-            // Cold start: se non abbiamo dati, usiamo un valore di default o calcolato su altri progetti.
-            // Per ora, usiamo un valore mediano comune in letteratura.
-            return 0.5;
+            System.out.println("Nessun ticket con IV nota. Uso valore di default per Cold Start (p=0.5).");
+            return 0.5; // Valore di default per Cold Start
         }
 
-        List<Double> pValues = new ArrayList<>();
-        for (JiraTicket ticket : ticketsWithKnownIV) {
-            double fv = releases.indexOf(ticket.getFixedVersion());
-            double ov = releases.indexOf(ticket.getOpeningVersion());
-            double iv = releases.indexOf(ticket.getInjectedVersion());
-            if (fv > ov) { // Evita divisione per zero
-                pValues.add((fv - iv) / (fv - ov));
-            }
-        }
+        List<Double> pValues = ticketsWithKnownIV.stream()
+                .map(ticket -> {
+                    double fv = ticket.getFixedVersion().getIndex();
+                    double ov = ticket.getOpeningVersion().getIndex();
+                    double iv = ticket.getInjectedVersion().getIndex();
+                    if (fv > ov) {
+                        return (fv - iv) / (fv - ov);
+                    }
+                    return -1.0; // Valore non valido da scartare
+                })
+                .filter(p -> p >= 0)
+                .collect(Collectors.toList());
 
-        // Calcola la media dei valori di p
+        if (pValues.isEmpty()) return 0.5; // Nessun valore valido
+
         return pValues.stream().mapToDouble(d -> d).average().orElse(0.5);
     }
 
+    /**
+     * Determina se un metodo era "buggy" in una data release usando la logica Post-Release.
+     * Un metodo è buggy in Release R se è stato modificato da un bug-fix commit
+     * DOPO il commit della Release R.
+     * @param history La storia completa del metodo.
+     * @param currentRelease La release per cui stiamo calcolando la bugginess.
+     * @return true se il metodo è considerato buggy, false altrimenti.
+     */
+    public boolean isMethodBuggyInRelease(MethodHistory history, Release currentRelease) {
+        if (history.getBugFixCommits().isEmpty()) {
+            return false;
+        }
+
+        long releaseTime = currentRelease.getCommit().getCommitTime();
+
+        // Controlla se esiste almeno un bug-fix commit nella storia del metodo
+        // che sia avvenuto DOPO il tempo di commit della release corrente.
+        for (RevCommit bugFixCommit : history.getBugFixCommits()) {
+            long fixTime = bugFixCommit.getCommitTime();
+            if (fixTime > releaseTime) {
+                return true; // Trovato un bug-fix post-release. Il metodo era buggy.
+            }
+        }
+
+        return false; // Nessun bug-fix trovato dopo la data della release.
+    }
+
+
+
     private void estimateMissingIVs(List<JiraTicket> ticketsWithUnknownIV, double p) {
         for (JiraTicket ticket : ticketsWithUnknownIV) {
-            double fv = releases.indexOf(ticket.getFixedVersion());
-            double ov = releases.indexOf(ticket.getOpeningVersion());
+            double fv = ticket.getFixedVersion().getIndex();
+            double ov = ticket.getOpeningVersion().getIndex();
 
+            // Formula inversa: IV = FV - (FV - OV) * p
             int estimatedIvIndex = (int) Math.round(fv - (fv - ov) * p);
+
+            // Assicurati che l'indice sia valido
             if (estimatedIvIndex < 0) estimatedIvIndex = 0;
             if (estimatedIvIndex >= releases.size()) estimatedIvIndex = releases.size() - 1;
 
             ticket.setInjectedVersion(releases.get(estimatedIvIndex));
         }
-    }
-
-    private void populateFileBuggyCycles(GitService gitService) throws IOException {
-        System.out.println("Associo i bug ai file modificati...");
-        // Questo è il pre-calcolo per la performance!
-        List<RevCommit> allBugCommits = null;
-        String projectKey = "BOOKKEEPER"; // Potremmo voler passare questo dal costruttore in futuro
-
-        try {
-// Dobbiamo sapere per quale progetto stiamo lavorando
-            allBugCommits = gitService.getCommitsFromTickets(getTicketKeys(), projectKey);        } catch (GitAPIException e) {
-            throw new RuntimeException(e);
-        }
-
-        for (RevCommit commit : allBugCommits) {
-            List<String> files = gitService.getTouchedFiles(commit);
-            for (String file : files) {
-                if (file.endsWith(".java")) {
-                    // Trova a quale ticket corrisponde questo commit per ottenere IV e FV
-                    JiraTicket associatedTicket = findTicketForCommit(commit.getFullMessage());
-                    if (associatedTicket != null && associatedTicket.getInjectedVersion() != null && associatedTicket.getFixedVersion() != null) {
-                        int ivIndex = releases.indexOf(associatedTicket.getInjectedVersion());
-                        int fvIndex = releases.indexOf(associatedTicket.getFixedVersion());
-
-                        String cycle = ivIndex + "-" + fvIndex;
-                        fileBuggyCycles.computeIfAbsent(file.replace("/", "\\"), k -> new ArrayList<>()).add(cycle);
-                    }
-                }
-            }
-        }
-    }
-
-    private Set<String> getTicketKeys() {
-        Set<String> keys = new HashSet<>();
-        for (JiraTicket ticket : tickets) {
-            keys.add(ticket.getKey());
-        }
-        return keys;
-    }
-
-    private JiraTicket findTicketForCommit(String commitMessage) {
-        for (JiraTicket ticket : tickets) {
-            if (commitMessage.contains(ticket.getKey())) {
-                return ticket;
-            }
-        }
-        return null;
     }
 }

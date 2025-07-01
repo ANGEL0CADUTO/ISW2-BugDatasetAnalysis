@@ -1,10 +1,11 @@
+// in src/main/java/org/example/services/GitService.java
 package org.example.services;
 
+import com.github.javaparser.ast.body.MethodDeclaration;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffEntry;
 import org.eclipse.jgit.diff.DiffFormatter;
-import org.eclipse.jgit.diff.Edit;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectLoader;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -15,80 +16,55 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.util.io.DisabledOutputStream;
-import org.example.model.Release;
+import org.example.model.MethodData;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public class GitService implements AutoCloseable {
-    private final Repository repository;
+public class GitService {
+    public final Repository repository; // Reso pubblico per accesso da Main
     private final Git git;
+    private final JavaParserUtil javaParserUtil = new JavaParserUtil();
 
-    // Classe interna (record) per contenere i risultati di un diff.
-    // Dichiarata public static per essere accessibile da altre classi come Main.
-    public static record CommitDiffInfo(int linesAdded, int linesDeleted, List<Edit> edits) {}
 
     public GitService(Path repositoryPath) throws IOException {
         this.git = Git.open(repositoryPath.toFile());
         this.repository = git.getRepository();
     }
 
-    public Git getGit() {
-        return git;
+    public Iterable<RevCommit> getAllCommits() throws GitAPIException, IOException {
+        return git.log().all().call();
     }
 
-    public List<Release> getReleases() throws GitAPIException, IOException {
-        System.out.println("Recupero e ordino le release da Git...");
+    public List<Ref> getAllReleasesSortedByDate() throws GitAPIException, IOException {
         List<Ref> tags = git.tagList().call();
-        List<Release> releases = new ArrayList<>();
-
+        Map<Ref, Integer> tagCommitTimes = new HashMap<>();
         try (RevWalk walk = new RevWalk(repository)) {
             for (Ref tag : tags) {
                 try {
                     RevCommit commit = walk.parseCommit(tag.getObjectId());
-                    String releaseName = tag.getName().replace("refs/tags/", "");
-                    releases.add(new Release(releaseName, commit, tag));
-                } catch (Exception e) {
-                    // Ignora tag non validi o che non puntano a commit
-                }
+                    tagCommitTimes.put(tag, commit.getCommitTime());
+                } catch (Exception e) { /* Ignora tag non validi */ }
             }
         }
-
-        Collections.sort(releases);
-        System.out.println("Trovate e ordinate " + releases.size() + " release.");
-        return releases;
+        tags.sort(Comparator.comparing(tagCommitTimes::get));
+        return tags;
     }
 
-    public List<RevCommit> getCommitsFromTickets(Set<String> ticketKeys, String projectKey) throws GitAPIException, IOException {
-        List<RevCommit> bugCommits = new ArrayList<>();
-        Pattern issuePattern = Pattern.compile(projectKey.toUpperCase() + "-\\d+");
+    public List<DiffEntry> getChangedFilesInCommit(RevCommit commit) throws IOException {
+        if (commit.getParentCount() == 0) return Collections.emptyList();
 
-        Iterable<RevCommit> allCommits = git.log().all().call();
-        for (RevCommit commit : allCommits) {
-            Matcher matcher = issuePattern.matcher(commit.getFullMessage().toUpperCase());
-            if (matcher.find() && ticketKeys.contains(matcher.group(0))) {
-                bugCommits.add(commit);
-            }
+        RevCommit parent = new RevWalk(repository).parseCommit(commit.getParent(0).getId());
+        try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
+             ObjectReader reader = repository.newObjectReader()) {
+            diffFormatter.setRepository(repository);
+            CanonicalTreeParser oldTree = new CanonicalTreeParser(null, reader, parent.getTree());
+            CanonicalTreeParser newTree = new CanonicalTreeParser(null, reader, commit.getTree());
+            return diffFormatter.scan(oldTree, newTree);
         }
-        return bugCommits;
-    }
-
-    public List<String> findJavaFilesInRelease(Release release) throws IOException {
-        List<String> javaFiles = new ArrayList<>();
-        try (TreeWalk treeWalk = new TreeWalk(repository)) {
-            treeWalk.addTree(release.getCommit().getTree());
-            treeWalk.setRecursive(true);
-            while (treeWalk.next()) {
-                if (treeWalk.getPathString().endsWith(".java")) {
-                    javaFiles.add(treeWalk.getPathString());
-                }
-            }
-        }
-        return javaFiles;
     }
 
     public String getFileContent(RevCommit commit, String filePath) throws IOException {
@@ -97,72 +73,72 @@ public class GitService implements AutoCloseable {
                 ObjectId blobId = treeWalk.getObjectId(0);
                 ObjectLoader loader = repository.open(blobId);
                 byte[] bytes = loader.getBytes();
-                return new String(bytes, StandardCharsets.UTF_8);
+                return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
             } else {
-                throw new IOException("File non trovato nel commit " + commit.getName() + ": " + filePath);
+                return ""; // File non trovato in questo commit
             }
         }
     }
 
-    public List<RevCommit> getCommitsTouchingFile(String filePath, RevCommit releaseCommit) throws GitAPIException, IOException {
-        List<RevCommit> commits = new ArrayList<>();
-        git.log().add(releaseCommit.getId()).addPath(filePath).call().forEach(commits::add);
-        Collections.reverse(commits);
-        return commits;
-    }
+    public Map<String, RevCommit> linkBugsToCommits(Set<String> bugKeys, String projectKey) throws GitAPIException, IOException {
+        Map<String, RevCommit> bugCommits = new HashMap<>();
+        Pattern issuePattern = Pattern.compile(projectKey.toUpperCase() + "-\\d+");
 
-    /**
-     * Per un dato commit, restituisce la lista dei path dei file modificati.
-     */
-    public List<String> getTouchedFiles(RevCommit commit) throws IOException {
-        List<String> touchedFiles = new ArrayList<>();
-        if (commit.getParentCount() == 0) return touchedFiles;
-
-        try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
-             ObjectReader reader = repository.newObjectReader()) {
-
-            RevCommit parent = new RevWalk(repository).parseCommit(commit.getParent(0).getId());
-            diffFormatter.setRepository(repository);
-
-            List<DiffEntry> diffs = diffFormatter.scan(parent.getTree(), commit.getTree());
-            for (DiffEntry diff : diffs) {
-                if (diff.getChangeType() == DiffEntry.ChangeType.ADD || diff.getChangeType() == DiffEntry.ChangeType.MODIFY) {
-                    touchedFiles.add(diff.getNewPath());
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Impossibile calcolare il diff per il commit: " + commit.getName());
-            return Collections.emptyList();
-        }
-        return touchedFiles;
-    }
-
-    public CommitDiffInfo getCommitDiff(RevCommit commit, String filePath) throws IOException {
-        List<Edit> edits = new ArrayList<>();
-        if (commit.getParentCount() == 0) return new CommitDiffInfo(0, 0, edits);
-
-        try (DiffFormatter diffFormatter = new DiffFormatter(DisabledOutputStream.INSTANCE);
-             ObjectReader reader = repository.newObjectReader()) {
-
-            RevCommit parent = new RevWalk(repository).parseCommit(commit.getParent(0).getId());
-            diffFormatter.setRepository(repository);
-            List<DiffEntry> diffs = diffFormatter.scan(parent.getTree(), commit.getTree());
-
-            for (DiffEntry diff : diffs) {
-                if (diff.getNewPath().equals(filePath) || diff.getOldPath().equals(filePath)) {
-                    edits.addAll(diffFormatter.toFileHeader(diff).toEditList());
-                    break;
+        Iterable<RevCommit> allCommits = getAllCommits();
+        for (RevCommit commit : allCommits) {
+            Matcher matcher = issuePattern.matcher(commit.getFullMessage().toUpperCase());
+            while (matcher.find()) {
+                if (bugKeys.contains(matcher.group(0))) {
+                    bugCommits.put(commit.getName(), commit);
+                    break; // Trovato un ID, basta per questo commit
                 }
             }
         }
-        // Il calcolo di linesAdded/Deleted non è necessario qui, lo facciamo nel chiamante
-        return new CommitDiffInfo(0, 0, edits);
+        return bugCommits;
     }
 
-    @Override
+    public Map<String, MethodData> getMethodsInRelease(RevCommit releaseCommit) throws IOException {
+        Map<String, MethodData> methodsInRelease = new HashMap<>();
+        try (TreeWalk treeWalk = new TreeWalk(repository)) {
+            treeWalk.addTree(releaseCommit.getTree());
+            treeWalk.setRecursive(true);
+            while (treeWalk.next()) {
+                String pathString = treeWalk.getPathString();
+                if (pathString.endsWith(".java")) {
+                    String fileContent = getFileContent(releaseCommit, pathString);
+                    List<JavaParserUtil.MethodParseResult> parsedMethods = javaParserUtil.extractMethodsWithDeclarations(fileContent);
+                    for (JavaParserUtil.MethodParseResult parsed : parsedMethods) {
+                        String uniqueID = pathString.replace("\\", "/") + "/" + parsed.methodInfo.getSignature();
+                        methodsInRelease.put(uniqueID, new MethodData(uniqueID, releaseCommit, parsed.methodDeclaration, fileContent));
+                    }
+                }
+            }
+        }
+        return methodsInRelease;
+    }
+    public Map<String, RevCommit> linkBugsToCommitsFromTickets(List<JiraTicket> tickets) throws GitAPIException, IOException {
+        Map<String, RevCommit> bugCommits = new HashMap<>();
+        Set<String> ticketKeys = tickets.stream().map(JiraTicket::getKey).collect(Collectors.toSet());
+
+        // Crea un pattern regex efficiente per trovare una qualsiasi delle chiavi dei ticket
+        String patternString = String.join("|", ticketKeys);
+        Pattern issuePattern = Pattern.compile(patternString);
+
+        System.out.println("Inizio linking dei commit ai ticket JIRA...");
+        Iterable<RevCommit> allCommits = getAllCommits();
+        for (RevCommit commit : allCommits) {
+            Matcher matcher = issuePattern.matcher(commit.getFullMessage());
+            if (matcher.find()) {
+                // Trovato un commit che menziona almeno un ID di ticket
+                bugCommits.put(commit.getName(), commit);
+            }
+        }
+        System.out.println("Trovati " + bugCommits.size() + " commit che menzionano ticket di bug.");
+        return bugCommits;
+    }
+
     public void close() {
-        if (this.git != null) {
-            this.git.close();
-        }
+        git.close();
+        repository.close();
     }
 }
