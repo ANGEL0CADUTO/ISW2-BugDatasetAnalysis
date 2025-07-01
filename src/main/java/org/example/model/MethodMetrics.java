@@ -10,7 +10,7 @@ public class MethodMetrics {
     private int cyclomaticComplexity;
     private int parameterCount;
     private int nestingDepth;
-    private int nSmells; // Placeholder
+    private int nSmells;
 
     // 5 Feature di Change
     private int methodHistories; // NR
@@ -34,7 +34,6 @@ public class MethodMetrics {
         return allMetrics;
     }
 
-    // Setters
     public void setComplexityMetrics(int loc, int cc, int paramCount, int nesting, int smells) {
         this.loc = loc;
         this.cyclomaticComplexity = cc;
@@ -43,11 +42,15 @@ public class MethodMetrics {
         this.nSmells = smells;
     }
 
-    public void setChangeMetrics(MethodHistory history) {
-        this.methodHistories = history.getMethodHistories();
-        this.authors = history.getAuthorsCount();
-        this.churn = history.getChurn();
-        this.maxChurn = history.getMaxChurn();
-        this.avgChurn = history.getAvgChurn();
+    /**
+     * QUESTA È LA FIRMA CORRETTA DEL METODO.
+     * Accetta 5 argomenti, esattamente come viene chiamato da MetricsLogic.
+     */
+    public void setChangeMetrics(int nr, int nAuth, int churn, int maxChurn, double avgChurn) {
+        this.methodHistories = nr;
+        this.authors = nAuth;
+        this.churn = churn;
+        this.maxChurn = maxChurn;
+        this.avgChurn = avgChurn;
     }
 }
