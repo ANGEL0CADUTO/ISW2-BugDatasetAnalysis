@@ -24,6 +24,16 @@ public class MethodData {
     private int stmtDeleted; // Non richiesto esplicitamente, ma utile per il churn
     private int churn;
 
+    private int numRevisions;
+
+    public int getNumRevisions() {
+        return numRevisions;
+    }
+
+    public void setNumRevisions(int numRevisions) {
+        this.numRevisions = numRevisions;
+    }
+
     public MethodData(String releaseName, String methodIdentifier) {
         this.releaseName = releaseName;
         this.methodIdentifier = methodIdentifier;
