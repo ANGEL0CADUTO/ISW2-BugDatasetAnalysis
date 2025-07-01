@@ -13,40 +13,50 @@ public class MethodHistory {
     private final Set<String> authors = new HashSet<>();
     private final List<RevCommit> bugFixCommits = new ArrayList<>();
 
-    // Campi per le metriche di change
-    private int churn = 0;
+    private int stmtAdded = 0;
+    private int stmtDeleted = 0;
+    private int maxStmtAdded = 0;
+    private int maxStmtDeleted = 0;
     private int maxChurn = 0;
+    private int condChanges = 0;
+    private int elseAdded = 0;
+    private int elseDeleted = 0;
 
     public MethodHistory(String uniqueID) {
         this.uniqueID = uniqueID;
     }
 
-    // Questo metodo verrà chiamato dall'HistoryAnalyzer
-    public void addVersion(MethodData version, int added, int deleted) {
-        this.versions.add(version);
+    // ...
+    public void addChange(MethodData version, int added, int deleted) {
+        this.versions.add(version); // 'version' potrebbe avere una declaration null
+        // L'autore è ancora accessibile dal commit dentro l'oggetto version
         this.authors.add(version.getCommit().getAuthorIdent().getName());
 
-        // Aggiorna metriche di change
+        this.stmtAdded += added;
+        this.stmtDeleted += deleted;
         int currentChurn = added + deleted;
-        this.churn += currentChurn;
 
         if (currentChurn > this.maxChurn) {
             this.maxChurn = currentChurn;
         }
     }
 
-    public void addBugFixCommit(RevCommit commit) {
+    public void addFix(RevCommit commit) {
         this.bugFixCommits.add(commit);
     }
 
     // Getters per le feature di change
     public int getMethodHistories() { return this.versions.size(); }
     public int getAuthorsCount() { return this.authors.size(); }
-    public int getChurn() { return this.churn; }
-    public int getMaxChurn() { return this.maxChurn; }
+    public int getStmtAdded() { return stmtAdded; }
+    public int getStmtDeleted() { return stmtDeleted; }
+    public int getMaxStmtAdded() { return maxStmtAdded; }
+    public int getMaxStmtDeleted() { return maxStmtDeleted; }
+    public double getAvgStmtAdded() { return versions.isEmpty() ? 0 : (double) stmtAdded / versions.size(); }
+    public double getAvgStmtDeleted() { return versions.isEmpty() ? 0 : (double) stmtDeleted / versions.size(); }
+    public int getChurn() { return this.stmtAdded + this.stmtDeleted; }
+    public int getMaxChurn() { return maxChurn; }
     public double getAvgChurn() { return versions.isEmpty() ? 0 : (double) getChurn() / versions.size(); }
 
-    public String getUniqueID() { return uniqueID; }
-    public List<MethodData> getVersions() { return versions; }
     public List<RevCommit> getBugFixCommits() { return bugFixCommits; }
 }

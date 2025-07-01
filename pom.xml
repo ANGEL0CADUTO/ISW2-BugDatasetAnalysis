@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.example</groupId>
-    <artifactId>BookeeperDatasetExtractor</artifactId>
+    <artifactId>bookkeeper_dataset_extractor</artifactId>
     <version>1.0-SNAPSHOT</version>
 
     <properties>
@@ -25,10 +25,16 @@
         <!-- JavaParser per l'analisi del codice Java -->
         <dependency>
             <groupId>com.github.javaparser</groupId>
-            <artifactId>javaparser-symbol-solver-core</artifactId>
+            <artifactId>javaparser-core</artifactId>
             <version>3.25.5</version>
         </dependency>
 
+        <!-- Libreria per confrontare sequenze (per il diff degli statement) -->
+        <dependency>
+            <groupId>io.github.java-diff-utils</groupId>
+            <artifactId>java-diff-utils</artifactId>
+            <version>4.15</version>
+        </dependency>
         <!-- Per scrivere il file CSV -->
         <dependency>
             <groupId>org.apache.commons</groupId>
@@ -49,19 +55,13 @@
             <artifactId>jackson-databind</artifactId>
             <version>2.15.2</version>
         </dependency>
+
+        <!-- Logger (buona pratica, richiesto da alcune librerie) -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>
             <version>2.0.7</version>
         </dependency>
-        <!-- Libreria per confrontare sequenze (es. linee o statement di un metodo) -->
-        <dependency>
-            <groupId>com.github.java-diff-utils</groupId>
-            <artifactId>java-diff-utils</artifactId>
-            <version>4.12</version>
-        </dependency>
-
-
     </dependencies>
 
 </project>

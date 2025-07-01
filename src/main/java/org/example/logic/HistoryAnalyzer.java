@@ -3,16 +3,18 @@ package org.example.logic;
 
 import com.github.difflib.DiffUtils;
 import com.github.difflib.patch.AbstractDelta;
+import com.github.difflib.patch.DeltaType;
 import com.github.difflib.patch.Patch;
+import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.stmt.Statement;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.diff.DiffEntry;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.example.model.MethodData;
 import org.example.model.MethodHistory;
 import org.example.services.GitService;
-import org.example.services.JavaParserUtil;
 
 import java.io.IOException;
 import java.util.*;
@@ -21,47 +23,48 @@ import java.util.stream.Collectors;
 public class HistoryAnalyzer {
 
     private final GitService gitService;
-    private final JavaParserUtil javaParserUtil;
 
     public HistoryAnalyzer(GitService gitService) {
         this.gitService = gitService;
-        this.javaParserUtil = new JavaParserUtil();
     }
 
-    public Map<String, MethodHistory> buildMethodsHistories(Map<String, RevCommit> bugCommits)
-            throws GitAPIException, IOException {
-
+    public Map<String, MethodHistory> buildMethodsHistories(Map<String, RevCommit> bugCommits) throws GitAPIException, IOException {
         System.out.println("Inizio costruzione della storia dei metodi. Questo è il passo più lungo...");
-
         Map<String, MethodHistory> histories = new HashMap<>();
+        // Cache per non ri-parsare lo stesso file più volte
+        Map<ObjectId, Map<String, List<String>>> parsedFileCache = new HashMap<>();
+
         Iterable<RevCommit> allCommits = gitService.getAllCommits();
 
         int commitCount = 0;
         for (RevCommit commit : allCommits) {
             commitCount++;
-            if (commitCount % 1000 == 0) {
-                System.out.printf("Analisi commit %d...%n", commitCount);
-            }
-            if (commit.getParentCount() == 0) continue; // Salta il primo commit
+            if (commitCount % 500 == 0) System.out.printf("Analisi commit %d...%n", commitCount);
+            if (commit.getParentCount() == 0) continue;
 
+            RevCommit parent = commit.getParent(0);
             List<DiffEntry> diffs = gitService.getChangedFilesInCommit(commit);
+
             for (DiffEntry diff : diffs) {
-                String newPath = diff.getNewPath();
-                if (!newPath.endsWith(".java")) continue;
+                if (!diff.getNewPath().endsWith(".java")) continue;
 
-                Map<String, MethodData> methodsBefore = getMethodsFromFile(commit.getParent(0), diff.getOldPath());
-                Map<String, MethodData> methodsAfter = getMethodsFromFile(commit, newPath);
+                // --- OTTIMIZZAZIONE MEMORIA ---
+                // Estraiamo solo gli statement, non l'intero AST
+                Map<String, List<String>> stmtsBefore = getMethodStatements(parent, diff.getOldPath(), parsedFileCache);
+                Map<String, List<String>> stmtsAfter = getMethodStatements(commit, diff.getNewPath(), parsedFileCache);
 
-                compareMethodVersions(methodsBefore, methodsAfter, commit, histories);
+                compareMethodStatements(diff.getNewPath(), stmtsBefore, stmtsAfter, commit, histories);
             }
 
-            // Associa il bug fix ai metodi che esistevano in questo commit
+            // Associa il bug fix ai metodi toccati
             if (bugCommits.containsKey(commit.getName())) {
                 for (DiffEntry diff : diffs) {
-                    if(diff.getNewPath().endsWith(".java")) {
-                        Map<String, MethodData> methodsInCommit = getMethodsFromFile(commit, diff.getNewPath());
-                        for(String methodId : methodsInCommit.keySet()) {
-                            histories.computeIfAbsent(methodId, MethodHistory::new).addBugFixCommit(commit);
+                    if (diff.getNewPath().endsWith(".java")) {
+                        // Rileggiamo solo le firme dei metodi, senza tenere l'AST in memoria
+                        Map<String, MethodDeclaration> methodsInCommit = getMethodSignatures(commit, diff.getNewPath());
+                        for (String signature : methodsInCommit.keySet()) {
+                            String uniqueID = diff.getNewPath().replace("\\", "/") + "/" + signature;
+                            histories.computeIfAbsent(uniqueID, MethodHistory::new).addFix(commit);
                         }
                     }
                 }
@@ -71,66 +74,79 @@ public class HistoryAnalyzer {
         return histories;
     }
 
-    private Map<String, MethodData> getMethodsFromFile(RevCommit commit, String filePath) throws IOException {
-        Map<String, MethodData> methods = new HashMap<>();
-        if (commit == null || filePath.equals("/dev/null")) return methods;
+    /**
+     * OTTIMIZZATO: Estrae solo le liste di statement per ogni metodo, usando una cache.
+     */
+    private Map<String, List<String>> getMethodStatements(RevCommit commit, String filePath, Map<ObjectId, Map<String, List<String>>> cache) throws IOException {
+        if ("/dev/null".equals(filePath)) return Collections.emptyMap();
 
-        String fileContent = gitService.getFileContent(commit, filePath);
-        if(fileContent.isEmpty()) return methods;
+        ObjectId fileId = gitService.getFileId(commit, filePath);
+        if (fileId == null) return Collections.emptyMap();
 
-        List<JavaParserUtil.MethodParseResult> parsedMethods = javaParserUtil.extractMethodsWithDeclarations(fileContent);
-        for (JavaParserUtil.MethodParseResult parsed : parsedMethods) {
-            String uniqueID = filePath.replace("\\", "/") + "/" + parsed.methodInfo.getSignature();
-            methods.put(uniqueID, new MethodData(uniqueID, commit, parsed.methodDeclaration, fileContent));
+        // Controlla se abbiamo già parsato questo esatto file
+        if (cache.containsKey(fileId)) {
+            return cache.get(fileId);
         }
+
+        Map<String, List<String>> methodsStatements = new HashMap<>();
+        String content = gitService.getFileContentAtCommit(commit, filePath);
+        if (content.isEmpty()) return Collections.emptyMap();
+
+        try {
+            StaticJavaParser.parse(content).findAll(MethodDeclaration.class).forEach(md -> {
+                String signature = md.getSignature().asString();
+                List<String> statements = md.getBody()
+                        .map(body -> body.getStatements().stream().map(Statement::toString).collect(Collectors.toList()))
+                        .orElse(Collections.emptyList());
+                methodsStatements.put(signature, statements);
+            });
+        } catch (Exception | StackOverflowError e) { /* Ignora errori di parsing su file complessi */ }
+
+        cache.put(fileId, methodsStatements);
+        return methodsStatements;
+    }
+
+    /**
+     * Estrae solo le dichiarazioni dei metodi (senza corpo) per risparmiare memoria.
+     */
+    private Map<String, MethodDeclaration> getMethodSignatures(RevCommit commit, String filePath) throws IOException {
+        Map<String, MethodDeclaration> methods = new HashMap<>();
+        String content = gitService.getFileContentAtCommit(commit, filePath);
+        if (content.isEmpty()) return methods;
+
+        try {
+            StaticJavaParser.parse(content).findAll(MethodDeclaration.class).forEach(md -> {
+                md.setBody(null); // Rimuove il corpo per liberare memoria
+                methods.put(md.getSignature().asString(), md);
+            });
+        } catch (Exception | StackOverflowError e) { /* Ignora errori di parsing */ }
         return methods;
     }
 
-    private void compareMethodVersions(Map<String, MethodData> before, Map<String, MethodData> after, RevCommit currentCommit, Map<String, MethodHistory> histories) {
-        // Metodi modificati o cancellati
-        for (MethodData methodBefore : before.values()) {
-            MethodData methodAfter = after.get(methodBefore.getUniqueID());
+    private void compareMethodStatements(String filePath, Map<String, List<String>> before, Map<String, List<String>> after, RevCommit commit, Map<String, MethodHistory> histories) {
+        for (Map.Entry<String, List<String>> entry : after.entrySet()) {
+            String signature = entry.getKey();
+            List<String> stmtsAfter = entry.getValue();
+            List<String> stmtsBefore = before.getOrDefault(signature, Collections.emptyList());
 
-            if (methodAfter != null) { // Il metodo esiste ancora
-                List<String> stmtsBefore = getStatementsAsString(methodBefore.getDeclaration());
-                List<String> stmtsAfter = getStatementsAsString(methodAfter.getDeclaration());
-
-                if (!stmtsBefore.equals(stmtsAfter)) { // Il metodo è stato modificato
-                    Patch<String> patch = DiffUtils.diff(stmtsBefore, stmtsAfter);
-                    int added = 0;
-                    int deleted = 0;
-                    for (AbstractDelta<String> delta : patch.getDeltas()) {
-                        switch (delta.getType()) {
-                            case INSERT: added += delta.getTarget().getLines().size(); break;
-                            case DELETE: deleted += delta.getSource().getLines().size(); break;
-                            case CHANGE:
-                                added += delta.getTarget().getLines().size();
-                                deleted += delta.getSource().getLines().size();
-                                break;
-                            default: break;
-                        }
+            if (!stmtsAfter.equals(stmtsBefore)) {
+                Patch<String> patch = DiffUtils.diff(stmtsBefore, stmtsAfter);
+                int added = 0;
+                int deleted = 0;
+                for (AbstractDelta<String> delta : patch.getDeltas()) {
+                    if (delta.getType() == DeltaType.INSERT) added += delta.getTarget().getLines().size();
+                    else if (delta.getType() == DeltaType.DELETE) deleted += delta.getSource().getLines().size();
+                    else if (delta.getType() == DeltaType.CHANGE) {
+                        added += delta.getTarget().getLines().size();
+                        deleted += delta.getSource().getLines().size();
                     }
-                    histories.computeIfAbsent(methodBefore.getUniqueID(), MethodHistory::new).addVersion(methodAfter, added, deleted);
                 }
+
+                String uniqueID = filePath.replace("\\", "/") + "/" + signature;
+                // Creiamo un MethodData "fittizio" senza l'AST completo per risparmiare memoria
+                MethodData dummyData = new MethodData(uniqueID, signature, commit, null);
+                histories.computeIfAbsent(uniqueID, MethodHistory::new).addChange(dummyData, added, deleted);
             }
         }
-        // Metodi aggiunti
-        for (MethodData methodAfter : after.values()) {
-            if (!before.containsKey(methodAfter.getUniqueID())) {
-                int stmtsAdded = countStatements(methodAfter.getDeclaration());
-                histories.computeIfAbsent(methodAfter.getUniqueID(), MethodHistory::new).addVersion(methodAfter, stmtsAdded, 0);
-            }
-        }
-    }
-
-    private List<String> getStatementsAsString(MethodDeclaration md) {
-        if (!md.getBody().isPresent()) return Collections.emptyList();
-        return md.getBody().get().getStatements().stream()
-                .map(Statement::toString)
-                .collect(Collectors.toList());
-    }
-
-    private int countStatements(MethodDeclaration md) {
-        return md.getBody().map(body -> body.getStatements().size()).orElse(0);
     }
 }

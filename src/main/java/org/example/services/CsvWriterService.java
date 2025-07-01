@@ -3,6 +3,8 @@ package org.example.services;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
+import org.example.model.MethodMetrics;
+
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -24,14 +26,14 @@ public class CsvWriterService {
         csvPrinter.flush();
     }
 
-    public void writeDataRow(String projectName, String methodID, String releaseId,
-                             String bugginess, List<Object> features) throws IOException {
+    public void writeDataRow(String projectName, String methodID, String releaseName,
+                             String bugginess, MethodMetrics metrics) throws IOException {
         List<Object> record = new ArrayList<>();
         record.add(projectName);
         record.add(methodID);
-        record.add(releaseId);
+        record.add(releaseName);
         record.add(bugginess);
-        record.addAll(features);
+        record.addAll(metrics.toList());
         csvPrinter.printRecord(record);
     }
 

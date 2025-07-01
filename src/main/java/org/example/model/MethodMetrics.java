@@ -13,38 +13,34 @@ public class MethodMetrics {
     private int nSmells; // Placeholder
 
     // 5 Feature di Change
-    private int methodHistories;
+    private int methodHistories; // NR
     private int authors;
     private int churn;
     private int maxChurn;
     private double avgChurn;
 
-    // Converte le metriche in una lista di oggetti per il CSV
     public List<Object> toList() {
         List<Object> allMetrics = new ArrayList<>();
-        // Complessità
         allMetrics.add(loc);
         allMetrics.add(cyclomaticComplexity);
         allMetrics.add(parameterCount);
         allMetrics.add(nestingDepth);
         allMetrics.add(nSmells);
-        // Change
         allMetrics.add(methodHistories);
         allMetrics.add(authors);
         allMetrics.add(churn);
         allMetrics.add(maxChurn);
         allMetrics.add(avgChurn);
-
         return allMetrics;
     }
 
     // Setters
-    public void setComplexityMetrics(List<Object> features) {
-        this.loc = (int) features.get(0);
-        this.cyclomaticComplexity = (int) features.get(1);
-        this.parameterCount = (int) features.get(2);
-        this.nestingDepth = (int) features.get(3);
-        this.nSmells = (int) features.get(4); // Per ora sarà 0
+    public void setComplexityMetrics(int loc, int cc, int paramCount, int nesting, int smells) {
+        this.loc = loc;
+        this.cyclomaticComplexity = cc;
+        this.parameterCount = paramCount;
+        this.nestingDepth = nesting;
+        this.nSmells = smells;
     }
 
     public void setChangeMetrics(MethodHistory history) {
