@@ -30,6 +30,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
+
+
 public class Main {
 
     // 1. INTRODUZIONE DI UN LOGGER STANDARD
@@ -37,6 +39,32 @@ public class Main {
 
     public static final AtomicInteger renameCount = new AtomicInteger(0);
     public static final AtomicInteger totalDiffCount = new AtomicInteger(0);
+
+    /**
+     * Classe contenitore per raggruppare i parametri passati tra i metodi,
+     * riducendo la complessità delle firme dei metodi (risolve lo smell "Long Parameter List").
+     */
+    private static class AnalysisContext {
+        final ProjectConfig config;
+        final List<Release> allReleases;
+        final List<JiraTicket> allTickets;
+        final HistoryAnalyzer.AnalysisResult analysisResult;
+        final MetricsLogic metricsLogic;
+        final BugginessLogic bugginessLogic;
+        final CsvWriterService csvWriter;
+
+        AnalysisContext(ProjectConfig config, List<Release> allReleases, List<JiraTicket> allTickets,
+                        HistoryAnalyzer.AnalysisResult analysisResult, CsvWriterService csvWriter) {
+            this.config = config;
+            this.allReleases = allReleases;
+            this.allTickets = allTickets;
+            this.analysisResult = analysisResult;
+            this.csvWriter = csvWriter;
+            this.metricsLogic = new MetricsLogic();
+            this.bugginessLogic = new BugginessLogic(allReleases, analysisResult.methodHistories);
+        }
+    }
+
 
     public static void main(String[] args) {
         ProjectConfig bookkeeperConfig = new ProjectConfig(
@@ -63,14 +91,12 @@ public class Main {
         long totalStartTime = System.currentTimeMillis();
         LOGGER.log(Level.INFO, "Avvio generazione dataset per il progetto: {0}", config.getProjectName());
 
-        // --- GESTIONE RISORSE: approccio classico con try-finally ---
         GitService gitService = null;
         CsvWriterService csvWriter = null;
         try {
             gitService = new GitService(Paths.get(config.getRepoPath()));
             csvWriter = new CsvWriterService(config.getOutputCsvPath());
 
-            // Fase 1: Setup e raccolta dati preliminare
             csvWriter.writeHeader("ProjectName", "MethodID", "ReleaseID",
                     "LOC", "CC", "ParamCount", "NestingDepth", "NSmells",
                     "NR", "NAuth", "Churn", "MaxChurn", "NFix", "AvgChurn",
@@ -79,24 +105,25 @@ public class Main {
             List<Release> allReleases = getReleases(gitService);
             List<JiraTicket> allTickets = new JiraService().getFixedBugTickets(config.getProjectName());
 
-            // Fase 2: Analisi storica e logica
             BugginessLogic bugginessLogic = new BugginessLogic(allReleases, null);
             bugginessLogic.calculateBugLifecycles(allTickets);
 
             HistoryAnalyzer.AnalysisResult analysisResult = analyzeHistory(gitService, allTickets);
 
-            // Fase 3: Processamento per release
+            // Crea l'oggetto contesto che raggruppa i parametri
+            AnalysisContext context = new AnalysisContext(config, allReleases, allTickets, analysisResult, csvWriter);
+
             List<Release> consideredReleases = filterReleases(allReleases);
-            processReleases(config, consideredReleases, analysisResult, allReleases, allTickets, csvWriter, gitService);
+            processReleases(consideredReleases, context, gitService);
 
             printSummary();
 
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Errore fatale durante l'esecuzione del progetto " + config.getProjectName(), e);
+            // --- LOGGER CONCATENATION FIX ---
+            LOGGER.log(Level.SEVERE, "Errore fatale durante l'esecuzione del progetto {0}", new Object[]{config.getProjectName(), e});
         } finally {
-            // Chiusura sicura delle risorse
             if (gitService != null) {
-                gitService.close(); // Assumendo che GitService abbia un metodo close()
+                gitService.close();
             }
             if (csvWriter != null) {
                 try {
@@ -105,6 +132,10 @@ public class Main {
                     LOGGER.log(Level.WARNING, "Errore durante la chiusura del CsvWriter.", e);
                 }
             }
+
+            LOGGER.log(Level.INFO, "Esecuzione terminata per {0}. Tempo totale: {1}ms",
+                    new Object[]{config.getProjectName(), (System.currentTimeMillis() - totalStartTime)});
+            LOGGER.log(Level.INFO, "Dataset salvato in: {0}", new File(config.getOutputCsvPath()).getAbsolutePath());
         }
 
         LOGGER.log(Level.INFO, "Esecuzione terminata per {0}. Tempo totale: {1}ms",
@@ -125,12 +156,8 @@ public class Main {
     /**
      * Itera sulle release selezionate per calcolare le metriche e scrivere il CSV.
      */
-    private void processReleases(ProjectConfig config, List<Release> releasesToProcess, HistoryAnalyzer.AnalysisResult analysisResult,
-                                 List<Release> allReleases, List<JiraTicket> allTickets, CsvWriterService csvWriter, GitService gitService) throws IOException {
+    private void processReleases(List<Release> releasesToProcess, AnalysisContext context, GitService gitService) throws IOException {
         LOGGER.info("Inizio analisi per release e generazione CSV...");
-
-        MetricsLogic metricsLogic = new MetricsLogic();
-        BugginessLogic finalBugginessLogic = new BugginessLogic(allReleases, analysisResult.methodHistories);
 
         for (Release currentRelease : releasesToProcess) {
             LOGGER.log(Level.INFO, "--- Processando release {0} ---", currentRelease.getName());
@@ -148,9 +175,7 @@ public class Main {
                     if (methodCount % 500 == 0) {
                         LOGGER.log(Level.INFO, "  ...analizzato metodo {0} / {1}", new Object[]{methodCount, totalMethods});
                     }
-
-                    calculateAndWriteMetrics(methodData, analysisResult, smellsMap, metricsLogic,
-                            finalBugginessLogic, currentRelease, allReleases, allTickets, config, csvWriter);
+                    calculateAndWriteMetrics(methodData, smellsMap, currentRelease, context);
                 }
             }
         }
@@ -170,18 +195,14 @@ public class Main {
             LOGGER.log(Level.INFO, "Analisi PMD completata. Trovati smells in {0} metodi.", smells.size());
             return smells;
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Errore durante il checkout o l'analisi PMD per la release " + release.getName(), e);
+            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release {0}", new Object[]{release.getName(), e});
             return Collections.emptyMap();
         } finally {
             if (tempDir != null) {
                 try {
-                    // Pulisce la directory temporanea
-                    Files.walk(tempDir)
-                            .sorted(Comparator.reverseOrder())
-                            .map(Path::toFile)
-                            .forEach(File::delete);
+                    Files.walk(tempDir).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
                 } catch (IOException e) {
-                    LOGGER.log(Level.WARNING, "Impossibile eliminare la directory temporanea: " + tempDir, e);
+                    LOGGER.log(Level.WARNING, "Impossibile eliminare la directory temporanea: {0}", new Object[]{tempDir, e});
                 }
             }
         }
@@ -190,27 +211,23 @@ public class Main {
     /**
      * Calcola tutte le metriche per un singolo metodo e scrive la riga nel CSV.
      */
-    private void calculateAndWriteMetrics(MethodData methodData, HistoryAnalyzer.AnalysisResult analysisResult,
-                                          Map<String, Integer> smellsMap, MetricsLogic metricsLogic, BugginessLogic bugginessLogic,
-                                          Release currentRelease, List<Release> allReleases, List<JiraTicket> allTickets,
-                                          ProjectConfig config, CsvWriterService csvWriter) throws IOException {
-
-        MethodHistory methodHistory = analysisResult.methodHistories.get(methodData.getUniqueID());
+    private void calculateAndWriteMetrics(MethodData methodData, Map<String, Integer> smellsMap, Release currentRelease, AnalysisContext context) throws IOException {
+        MethodHistory methodHistory = context.analysisResult.methodHistories.get(methodData.getUniqueID());
         if (methodHistory == null) methodHistory = new MethodHistory(methodData.getUniqueID());
 
         String filePath = methodData.getUniqueID().substring(0, methodData.getUniqueID().lastIndexOf('/'));
-        FileHistory fileHistory = analysisResult.fileHistories.get(filePath);
+        FileHistory fileHistory = context.analysisResult.fileHistories.get(filePath);
 
         int nSmells = smellsMap.getOrDefault(methodData.getUniqueID(), 0);
 
-        MethodMetrics metrics = metricsLogic.calculateMetricsForRelease(
+        MethodMetrics metrics = context.metricsLogic.calculateMetricsForRelease(
                 methodData, methodHistory, fileHistory,
-                currentRelease, nSmells, allReleases, allReleases.size()
+                currentRelease, nSmells, context.allReleases, context.allReleases.size()
         );
 
-        String bugginess = bugginessLogic.isBuggy(methodData.getUniqueID(), currentRelease, allTickets) ? "yes" : "no";
+        String bugginess = context.bugginessLogic.isBuggy(methodData.getUniqueID(), currentRelease, context.allTickets) ? "yes" : "no";
 
-        csvWriter.writeDataRow(config.getProjectName(), methodData.getUniqueID(), currentRelease.getName(), metrics, bugginess);
+        context.csvWriter.writeDataRow(context.config.getProjectName(), methodData.getUniqueID(), currentRelease.getName(), metrics, bugginess);
     }
 
     /**
