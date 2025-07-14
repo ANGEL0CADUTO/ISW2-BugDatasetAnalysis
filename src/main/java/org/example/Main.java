@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
+
 
 
 public class Main {
@@ -212,7 +212,8 @@ public class Main {
             LOGGER.log(Level.INFO, "Analisi PMD completata. Trovati smells in {0} metodi.", smells.size());
             return smells;
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release " + release.getName(), e);
+            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release: {0}", release.getName());
+            LOGGER.log(Level.SEVERE, "Dettagli dell’eccezione", e);
             return Collections.emptyMap();
         } finally {
             if (tempDir != null) {
