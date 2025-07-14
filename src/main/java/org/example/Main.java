@@ -24,6 +24,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -188,7 +191,20 @@ public class Main {
     private Map<String, Integer> analyzeSmellsForRelease(GitService gitService, Release release) {
         Path tempDir = null;
         try {
-            tempDir = Files.createTempDirectory("release-" + release.getName());
+            // --- CORREZIONE DI SICUREZZA ---
+            // Creiamo la directory temporanea con permessi ristretti (solo per il proprietario).
+            // Questo codice funziona su sistemi POSIX (Linux, macOS). Su Windows, viene
+            // generalmente ignorato ma non causa errori, mantenendo la portabilità.
+            FileAttribute<?>[] attributes;
+            if (System.getProperty("os.name").toLowerCase().contains("win")) {
+                attributes = new FileAttribute<?>[0]; // Nessun attributo speciale per Windows
+            } else {
+                Set<PosixFilePermission> perms = PosixFilePermissions.fromString("rwx------");
+                attributes = new FileAttribute<?>[]{ PosixFilePermissions.asFileAttribute(perms) };
+            }
+            tempDir = Files.createTempDirectory("release-" + release.getName() + "-", attributes);
+            // -----------------------------
+
             checkoutRelease(gitService, release.getCommit(), tempDir);
 
             LOGGER.info("Avvio analisi PMD...");
@@ -196,17 +212,15 @@ public class Main {
             LOGGER.log(Level.INFO, "Analisi PMD completata. Trovati smells in {0} metodi.", smells.size());
             return smells;
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release {0}, eccezione: {1}", new Object[]{release.getName(), e});
+            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release " + release.getName(), e);
             return Collections.emptyMap();
         } finally {
             if (tempDir != null) {
-                try (Stream<Path> paths = Files.walk(tempDir)) {
-                    paths.sorted(Comparator.reverseOrder())
-                            .map(Path::toFile)
-                            .forEach(File::delete);
+                try {
+                    Files.walk(tempDir).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
                 } catch (IOException e) {
                     LOGGER.log(Level.WARNING, "Impossibile eliminare la directory temporanea: {0}", tempDir);
-                    LOGGER.log(Level.WARNING, "Dettagli eccezione:", e);
+                    LOGGER.log(Level.FINEST, "Dettagli errore eliminazione directory", e);
                 }
             }
         }
