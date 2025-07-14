@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-
+import java.util.stream.Stream;
 
 
 public class Main {
@@ -120,7 +120,8 @@ public class Main {
 
         } catch (Exception e) {
             // --- LOGGER CONCATENATION FIX ---
-            LOGGER.log(Level.SEVERE, "Errore fatale durante l'esecuzione del progetto {0}", new Object[]{config.getProjectName(), e});
+            LOGGER.log(Level.SEVERE, "Errore fatale durante l''esecuzione del progetto {0}", new Object[]{config.getProjectName()});
+            LOGGER.log(Level.SEVERE, "Dettagli errore:", e);
         } finally {
             if (gitService != null) {
                 gitService.close();
@@ -195,14 +196,17 @@ public class Main {
             LOGGER.log(Level.INFO, "Analisi PMD completata. Trovati smells in {0} metodi.", smells.size());
             return smells;
         } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release {0}", new Object[]{release.getName(), e});
+            LOGGER.log(Level.SEVERE, "Errore durante checkout/PMD per la release {0}, eccezione: {1}", new Object[]{release.getName(), e});
             return Collections.emptyMap();
         } finally {
             if (tempDir != null) {
-                try {
-                    Files.walk(tempDir).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+                try (Stream<Path> paths = Files.walk(tempDir)) {
+                    paths.sorted(Comparator.reverseOrder())
+                            .map(Path::toFile)
+                            .forEach(File::delete);
                 } catch (IOException e) {
-                    LOGGER.log(Level.WARNING, "Impossibile eliminare la directory temporanea: {0}", new Object[]{tempDir, e});
+                    LOGGER.log(Level.WARNING, "Impossibile eliminare la directory temporanea: {0}", tempDir);
+                    LOGGER.log(Level.WARNING, "Dettagli eccezione:", e);
                 }
             }
         }
@@ -318,8 +322,8 @@ public class Main {
                         });
                         methodsInRelease.put(pathString.replace("\\", "/"), methodsInFile);
                     } catch (Exception | StackOverflowError e) {
-                        LOGGER.log(Level.WARNING, "Errore di parsing, file saltato: " + pathString, e);
-                    }
+                        LOGGER.log(Level.WARNING, "Errore di parsing, file saltato: {0}", pathString);
+                        LOGGER.log(Level.FINE, "Dettagli errore di parsing", e);                    }
                 }
             }
         }

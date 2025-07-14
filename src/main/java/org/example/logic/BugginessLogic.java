@@ -1,7 +1,7 @@
 // in src/main/java/org/example/logic/BugginessLogic.java
 package org.example.logic;
 
-import org.eclipse.jgit.revwalk.RevCommit;
+
 import org.example.model.JiraTicket;
 import org.example.model.MethodHistory;
 import org.example.model.Release;

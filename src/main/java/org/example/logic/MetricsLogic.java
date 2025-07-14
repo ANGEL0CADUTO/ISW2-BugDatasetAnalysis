@@ -7,118 +7,115 @@ import com.github.javaparser.ast.expr.ConditionalExpr;
 import com.github.javaparser.ast.stmt.*;
 import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.example.model.*; // Importa tutti i modelli, inclusi i nuovi
+import org.example.model.*;
 
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Optional; // Aggiungi questo import
 
 public class MetricsLogic {
 
     /**
-     * Entry point per il calcolo delle metriche.
-     * Ora accetta sia la storia del metodo (MethodHistory) che quella del file (FileHistory)
-     * per calcolare un set di feature più ricco e contestuale.
+     * Classe contenitore interna per aggregare i risultati durante il calcolo
+     * delle metriche di change, riducendo la complessità dei metodi.
      */
+    private static class ChangeMetricsAccumulator {
+        int cumulativeNR = 0;
+        Set<String> cumulativeAuthors = new HashSet<>();
+        double weightedChurn = 0.0;
+        int maxChurn = 0;
+        int cumulativeNFix = 0;
+    }
+
     public MethodMetrics calculateMetricsForRelease(MethodData methodData, MethodHistory methodHistory, FileHistory fileHistory,
                                                     Release currentRelease, int nSmells, List<Release> allReleases,
                                                     int totalReleasesCount) {
         MethodMetrics metrics = new MethodMetrics();
         MethodDeclaration mdNode = methodData.getDeclaration();
 
-        // 1. Calcola le metriche di complessità statica (logica invariata)
         int loc = mdNode.getEnd().map(p -> p.line).orElse(0) - mdNode.getBegin().map(p -> p.line).orElse(0) + 1;
         int cc = calculateCyclomaticComplexity(mdNode);
         int paramCount = mdNode.getParameters().size();
         int nesting = calculateNestingDepth(mdNode);
         metrics.setComplexityMetrics(loc, cc, paramCount, nesting, nSmells);
 
-        // 2. Calcola le metriche di "change" a livello di METODO
         calculateMethodChangeMetrics(metrics, methodHistory, currentRelease, allReleases, totalReleasesCount);
-
-        // 3. Calcola le nuove metriche di "change" a livello di CLASSE
         calculateClassChangeMetrics(metrics, fileHistory, currentRelease, allReleases, totalReleasesCount);
 
         return metrics;
     }
 
-    /**
-     * Calcola le metriche di "change" specifiche del METODO (NR, NAuth, Churn, etc.).
-     * Usa un approccio cumulativo con pesatura temporale.
-     */
     private void calculateMethodChangeMetrics(MethodMetrics metrics, MethodHistory methodHistory, Release currentRelease,
                                               List<Release> allReleases, int totalReleasesCount) {
-
-        // Se non c'è una storia per questo metodo, tutte le sue metriche di change sono 0.
         if (methodHistory == null) {
             metrics.setChangeMetrics(0, 0, 0, 0, 0, 0);
             return;
         }
 
-        int cumulativeNR = 0;
-        Set<String> cumulativeAuthors = new HashSet<>();
-        double weightedChurn = 0.0;
-        int maxChurn = 0;
-        int cumulativeNFix = 0;
-        int currentReleaseIndex = currentRelease.getIndex();
+        ChangeMetricsAccumulator accumulator = new ChangeMetricsAccumulator();
+        long releaseTime = currentRelease.getCommit().getCommitTime();
 
         for (MethodHistory.Change change : methodHistory.getChanges()) {
-            if (change.commit.getCommitTime() <= currentRelease.getCommit().getCommitTime()) {
-                cumulativeNR++;
-                cumulativeAuthors.add(change.commit.getAuthorIdent().getName());
-                if (change.churn > maxChurn) {
-                    maxChurn = change.churn;
-                }
-
-                Release changeRelease = findReleaseForCommit(change.commit, allReleases);
-                int changeReleaseIndex = (changeRelease != null) ? changeRelease.getIndex() : 0;
-                int ageInReleases = currentReleaseIndex - changeReleaseIndex;
-                double weight = 1.0 - ((double) ageInReleases / totalReleasesCount);
-
-                if (weight > 0) {
-                    weightedChurn += (change.churn * weight);
-                }
-
-                if (methodHistory.getBugFixCommits().stream().anyMatch(fixCommit -> fixCommit.equals(change.commit))) {
-                    cumulativeNFix++;
-                }
+            if (change.commit.getCommitTime() <= releaseTime) {
+                updateAccumulatorForChange(accumulator, change, methodHistory, currentRelease, allReleases, totalReleasesCount);
             }
         }
 
-        int totalWeightedChurn = (int) Math.round(weightedChurn);
-        long avgWeightedChurn = (cumulativeNR == 0) ? 0 : Math.round(weightedChurn / cumulativeNR);
+        int totalWeightedChurn = (int) Math.round(accumulator.weightedChurn);
+        long avgWeightedChurn = (accumulator.cumulativeNR == 0) ? 0 : Math.round(accumulator.weightedChurn / accumulator.cumulativeNR);
 
-        metrics.setChangeMetrics(cumulativeNR, cumulativeAuthors.size(), totalWeightedChurn,
-                maxChurn, avgWeightedChurn, cumulativeNFix);
+        metrics.setChangeMetrics(accumulator.cumulativeNR, accumulator.cumulativeAuthors.size(), totalWeightedChurn,
+                accumulator.maxChurn, avgWeightedChurn, accumulator.cumulativeNFix);
     }
 
     /**
-     * NUOVO METODO: Calcola le metriche di "change" a livello di CLASSE (File).
-     * Queste metriche catturano l'instabilità dell'intero file.
+     * Aggiorna l'accumulatore delle metriche per un singolo cambiamento.
      */
+    private void updateAccumulatorForChange(ChangeMetricsAccumulator acc, MethodHistory.Change change, MethodHistory history,
+                                            Release currentRelease, List<Release> allReleases, int totalReleasesCount) {
+        acc.cumulativeNR++;
+        acc.cumulativeAuthors.add(change.commit.getAuthorIdent().getName());
+        if (change.churn > acc.maxChurn) {
+            acc.maxChurn = change.churn;
+        }
+
+        // Calcolo del peso temporale
+        Release changeRelease = findReleaseForCommit(change.commit, allReleases);
+        int changeReleaseIndex = (changeRelease != null) ? changeRelease.getIndex() : 0;
+        int ageInReleases = currentRelease.getIndex() - changeReleaseIndex;
+        double weight = 1.0 - ((double) ageInReleases / totalReleasesCount);
+
+        if (weight > 0) {
+            acc.weightedChurn += (change.churn * weight);
+        }
+
+        if (history.getBugFixCommits().stream().anyMatch(fixCommit -> fixCommit.equals(change.commit))) {
+            acc.cumulativeNFix++;
+        }
+    }
+
     private void calculateClassChangeMetrics(MethodMetrics metrics, FileHistory fileHistory, Release currentRelease,
                                              List<Release> allReleases, int totalReleasesCount) {
-
-        // Se non c'è una storia per questo file, tutte le sue metriche di change sono 0.
         if (fileHistory == null) {
-            metrics.setClassChangeMetrics(0, 0, 0,0);
+            metrics.setClassChangeMetrics(0, 0, 0, 0);
             return;
         }
 
         int classNR = 0;
         Set<String> classAuthors = new HashSet<>();
         double weightedClassChurn = 0.0;
-        int currentReleaseIndex = currentRelease.getIndex();
+        long releaseTime = currentRelease.getCommit().getCommitTime();
 
         for (MethodHistory.Change change : fileHistory.getChanges()) {
-            if (change.commit.getCommitTime() <= currentRelease.getCommit().getCommitTime()) {
+            if (change.commit.getCommitTime() <= releaseTime) {
                 classNR++;
                 classAuthors.add(change.commit.getAuthorIdent().getName());
 
                 Release changeRelease = findReleaseForCommit(change.commit, allReleases);
                 int changeReleaseIndex = (changeRelease != null) ? changeRelease.getIndex() : 0;
-                int ageInReleases = currentReleaseIndex - changeReleaseIndex;
+                int ageInReleases = currentRelease.getIndex() - changeReleaseIndex;
                 double weight = 1.0 - ((double) ageInReleases / totalReleasesCount);
 
                 if (weight > 0) {
@@ -126,14 +123,11 @@ public class MetricsLogic {
                 }
             }
         }
-        long avgClassChurn = (classNR == 0) ? 0 : Math.round(weightedClassChurn / classNR);
 
+        long avgClassChurn = (classNR == 0) ? 0 : Math.round(weightedClassChurn / classNR);
         metrics.setClassChangeMetrics(classNR, classAuthors.size(), (int) Math.round(weightedClassChurn), avgClassChurn);
     }
 
-    /**
-     * Metodo di supporto per trovare la prima release pubblicata dopo (o durante) un dato commit.
-     */
     private Release findReleaseForCommit(RevCommit commit, List<Release> allReleases) {
         long commitTime = commit.getCommitTime();
         return allReleases.stream()
@@ -142,18 +136,24 @@ public class MetricsLogic {
                 .orElse(null);
     }
 
-    // --- Metodi per il calcolo della complessità (invariati) ---
+    /**
+     * Calcola la Complessità Ciclomatica di un metodo.
+     * Risolve lo smell dell'accesso a Optional senza isPresent().
+     */
     public int calculateCyclomaticComplexity(MethodDeclaration md) {
         int cc = 1;
-        if (md.getBody().isPresent()) {
-            cc += md.getBody().get().findAll(IfStmt.class).size();
-            cc += md.getBody().get().findAll(ForStmt.class).size();
-            cc += md.getBody().get().findAll(WhileStmt.class).size();
-            cc += md.getBody().get().findAll(DoStmt.class).size();
-            cc += md.getBody().get().findAll(SwitchEntry.class, se -> !se.getLabels().isEmpty()).size();
-            cc += md.getBody().get().findAll(CatchClause.class).size();
-            cc += md.getBody().get().findAll(ConditionalExpr.class).size();
-            cc += md.getBody().get().findAll(BinaryExpr.class, be -> be.getOperator() == BinaryExpr.Operator.AND || be.getOperator() == BinaryExpr.Operator.OR).size();
+        // Controlla se il corpo del metodo esiste prima di accedervi.
+        Optional<BlockStmt> bodyOpt = md.getBody();
+        if (bodyOpt.isPresent()) {
+            BlockStmt body = bodyOpt.get();
+            cc += body.findAll(IfStmt.class).size();
+            cc += body.findAll(ForStmt.class).size();
+            cc += body.findAll(WhileStmt.class).size();
+            cc += body.findAll(DoStmt.class).size();
+            cc += body.findAll(SwitchEntry.class, se -> !se.getLabels().isEmpty()).size();
+            cc += body.findAll(CatchClause.class).size();
+            cc += body.findAll(ConditionalExpr.class).size();
+            cc += body.findAll(BinaryExpr.class, be -> be.getOperator() == BinaryExpr.Operator.AND || be.getOperator() == BinaryExpr.Operator.OR).size();
         }
         return cc;
     }
