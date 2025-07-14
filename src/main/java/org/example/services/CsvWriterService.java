@@ -11,14 +11,22 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
-public class CsvWriterService {
+public class CsvWriterService implements AutoCloseable {
+    private static final Logger LOGGER = Logger.getLogger(CsvWriterService.class.getName());
+
+    // --- MODIFICA 1: Rendi 'writer' e 'csvPrinter' campi della classe ---
+    private final BufferedWriter writer;
     private final CSVPrinter csvPrinter;
 
     public CsvWriterService(String filePath) throws IOException {
-        BufferedWriter writer = Files.newBufferedWriter(Paths.get(filePath));
-        this.csvPrinter = new CSVPrinter(writer, CSVFormat.DEFAULT);
-        System.out.println("CSV Writer inizializzato per: " + filePath);
+        // Inizializza il writer come campo della classe
+        this.writer = Files.newBufferedWriter(Paths.get(filePath));
+        // Passa il writer al printer
+        this.csvPrinter = new CSVPrinter(this.writer, CSVFormat.DEFAULT);
+        LOGGER.log(Level.INFO, "CSV Writer inizializzato per: {0}", filePath);
     }
 
     public void writeHeader(String... headers) throws IOException {
@@ -26,45 +34,50 @@ public class CsvWriterService {
         csvPrinter.flush();
     }
 
-
     public void writeDataRow(String projectName, String methodID, String releaseName,
                              MethodMetrics metrics, String bugginess) throws IOException {
-        List<Object> record = new ArrayList<>();
-        record.add(projectName);
-        record.add(methodID);
-        record.add(releaseName);
+        // La variabile 'record' è stata rinominata in 'dataRow'
+        List<Object> dataRow = new ArrayList<>();
+        dataRow.add(projectName);
+        dataRow.add(methodID);
+        dataRow.add(releaseName);
 
         List<Object> metricValues = metrics.toList();
-        record.addAll(metricValues);
-        record.add(bugginess);
+        dataRow.addAll(metricValues);
+        dataRow.add(bugginess);
 
-        // --- DEBUG ---
-        boolean hasAnomaly = false;
-        for (Object val : metricValues) {
-            if (val instanceof Number) {
-                double numVal = ((Number) val).doubleValue();
-                // Controlla per valori enormi o non validi
-                if (numVal > 1000000 || Double.isInfinite(numVal) || Double.isNaN(numVal)) {
-                    hasAnomaly = true;
-                    break;
+        validateMetrics(methodID, releaseName, metricValues);
+
+        csvPrinter.printRecord(dataRow);
+    }
+
+    private void validateMetrics(String methodID, String releaseName, List<Object> metricValues) {
+        for (Object metricValue : metricValues) {
+            if (metricValue instanceof Number numVal) {
+                double value = numVal.doubleValue();
+                if (value > 1_000_000 || Double.isInfinite(value) || Double.isNaN(value)) {
+                    String errorMessage = String.format("Anomalia numerica rilevata per il metodo %s nella release %s", methodID, releaseName);
+                    LOGGER.log(Level.SEVERE, "{0}. Valori metriche: {1}", new Object[]{errorMessage, metricValues});
+                    throw new IllegalArgumentException(errorMessage);
                 }
             }
         }
-
-        if (hasAnomaly) {
-            System.err.println("!!! ANOMALIA NUMERICA RILEVATA !!!");
-            System.err.println("MethodID: " + methodID);
-            System.err.println("ReleaseID: " + releaseName);
-            System.err.println("Valori metriche grezzi: " + metricValues);
-            throw new RuntimeException("Anomalia numerica rilevata per il metodo " + methodID);
-        }
-        // ---------------------------------------------
-
-        csvPrinter.printRecord(record);
     }
 
+    @Override
     public void close() throws IOException {
-        csvPrinter.flush();
-        csvPrinter.close();
+        try {
+            // Chiudi prima la risorsa che "avvolge" l'altra
+            this.csvPrinter.flush();
+            this.csvPrinter.close();
+        } finally {
+            // --- MODIFICA 2: Assicurati che anche il writer sia chiuso in un blocco finally ---
+            // Questo garantisce la chiusura anche se csvPrinter.close() fallisce,
+            // soddisfacendo pienamente Sonar.
+            if (this.writer != null) {
+                this.writer.close();
+            }
+        }
+        LOGGER.info("CSV Writer chiuso correttamente.");
     }
 }

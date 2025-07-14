@@ -16,7 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths; // <-- IMPORT AGGIUNTO
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -30,20 +30,15 @@ public class PmdAnalyzer {
 
     public PmdAnalyzer() {
         config = new PMDConfiguration();
-
         config.addRuleSet("category/java/bestpractices.xml");
         config.addRuleSet("category/java/design.xml");
 
-        //ABILITA ANALISI PARALLELA ---
         int numThreads = Runtime.getRuntime().availableProcessors();
         LOGGER.info("Configurazione PMD per usare {} thread.", numThreads);
         config.setThreads(numThreads);
 
-
         config.setDefaultLanguageVersion(
                 LanguageRegistry.PMD.getLanguageVersionById("java", "17"));
-
-
     }
 
     public Map<String, Integer> countSmellsPerMethod(Path releaseDir) {
@@ -51,7 +46,6 @@ public class PmdAnalyzer {
         Map<String, Integer> smellsPerMethod = new HashMap<>();
 
         PMDConfiguration releaseConfig = new PMDConfiguration();
-
         releaseConfig.setRuleSets(new ArrayList<>(config.getRuleSetPaths()));
         releaseConfig.setMinimumPriority(RulePriority.LOW);
         releaseConfig.setDefaultLanguageVersion(
@@ -60,46 +54,14 @@ public class PmdAnalyzer {
 
         try (PmdAnalysis analysis = PmdAnalysis.create(releaseConfig)) {
             Report report = analysis.performAnalysisAndCollectReport();
-
             LOGGER.info("Analisi PMD completata. Trovate {} violazioni.", report.getViolations().size());
 
-// 1. Raggruppa le violazioni per file
             Map<Path, List<RuleViolation>> violationsByFile = report.getViolations().stream()
                     .collect(Collectors.groupingBy(v -> Paths.get(v.getFileId().getOriginalPath())));
 
-            // 2. Itera sui file, parsando ogni file una sola volta
+            // Il ciclo principale ora è più pulito e delega il lavoro.
             for (Map.Entry<Path, List<RuleViolation>> entry : violationsByFile.entrySet()) {
-                Path filePath = entry.getKey();
-                List<RuleViolation> violationsInFile = entry.getValue();
-
-                try {
-                    // Parsa il file UNA SOLA VOLTA
-                    CompilationUnit cu = StaticJavaParser.parse(filePath);
-                    List<MethodDeclaration> methodsInFile = cu.findAll(MethodDeclaration.class);
-
-                    // 3. Per ogni violazione in questo file, trova il metodo corrispondente
-                    for (RuleViolation violation : violationsInFile) {
-                        int beginLine = violation.getBeginLine();
-                        int endLine = violation.getEndLine();
-
-                        Optional<MethodDeclaration> foundMethod = methodsInFile.stream()
-                                .filter(md -> md.getRange().isPresent() &&
-                                        md.getRange().get().begin.line <= beginLine &&
-                                        md.getRange().get().end.line >= endLine)
-                                .findFirst();
-
-                        if (foundMethod.isPresent()) {
-                            String signature = foundMethod.get().getSignature().asString();
-                            String relativePath = releaseDir.relativize(filePath).toString().replace("\\", "/");
-                            String methodID = relativePath + "/" + signature;
-                            smellsPerMethod.put(methodID, smellsPerMethod.getOrDefault(methodID, 0) + 1);
-                        }
-                    }
-                } catch (IOException | StackOverflowError e) {
-                    LOGGER.warn("Impossibile parsare il file {} per la mappatura dello smell", filePath, e);
-                } catch (Exception e) {
-                    LOGGER.warn("Errore generico di parsing per il file {}", filePath, e);
-                }
+                mapViolationsForFile(entry.getKey(), entry.getValue(), smellsPerMethod, releaseDir);
             }
 
         } catch (Exception e) {
@@ -110,26 +72,42 @@ public class PmdAnalyzer {
         return smellsPerMethod;
     }
 
-    private String findMethodIDForViolation(Path absoluteFilePath, int beginLine, int endLine, Path releaseDir) {
+    /**
+     * Metodo privato estratto per gestire il parsing di un singolo file e la mappatura
+     * delle sue violazioni, risolvendo lo smell del blocco try annidato.
+     */
+    private void mapViolationsForFile(Path filePath, List<RuleViolation> violationsInFile,
+                                      Map<String, Integer> smellsPerMethod, Path releaseDir) {
         try {
-            String fileContent = new String(Files.readAllBytes(absoluteFilePath));
-            Optional<MethodDeclaration> foundMethod = StaticJavaParser.parse(fileContent)
-                    .findAll(MethodDeclaration.class).stream()
-                    .filter(md -> md.getRange().isPresent() &&
-                            md.getRange().get().begin.line <= beginLine &&
-                            md.getRange().get().end.line >= endLine)
-                    .findFirst();
+            // Parsa il file UNA SOLA VOLTA
+            CompilationUnit cu = StaticJavaParser.parse(filePath);
+            List<MethodDeclaration> methodsInFile = cu.findAll(MethodDeclaration.class);
 
-            if (foundMethod.isPresent()) {
-                String signature = foundMethod.get().getSignature().asString();
-                String relativePath = releaseDir.relativize(absoluteFilePath).toString().replace("\\", "/");
-                return relativePath + "/" + signature;
+            // Per ogni violazione in questo file, trova il metodo corrispondente
+            for (RuleViolation violation : violationsInFile) {
+                int beginLine = violation.getBeginLine();
+                int endLine = violation.getEndLine();
+
+                Optional<MethodDeclaration> foundMethod = methodsInFile.stream()
+                        .filter(md -> md.getRange().isPresent() &&
+                                md.getRange().get().begin.line <= beginLine &&
+                                md.getRange().get().end.line >= endLine)
+                        .findFirst();
+
+                if (foundMethod.isPresent()) {
+                    String signature = foundMethod.get().getSignature().asString();
+                    String relativePath = releaseDir.relativize(filePath).toString().replace("\\", "/");
+                    String methodID = relativePath + "/" + signature;
+                    smellsPerMethod.put(methodID, smellsPerMethod.getOrDefault(methodID, 0) + 1);
+                }
             }
         } catch (IOException | StackOverflowError e) {
-            LOGGER.warn("Impossibile parsare il file {} per la mappatura dello smell", absoluteFilePath);
+            LOGGER.warn("Impossibile parsare il file {} per la mappatura dello smell", filePath, e);
         } catch (Exception e) {
-            LOGGER.warn("Errore generico di parsing per il file {}", absoluteFilePath);
+            LOGGER.warn("Errore generico di parsing per il file {}", filePath, e);
         }
-        return null;
     }
+
+    // Il vecchio metodo findMethodIDForViolation non è più necessario e può essere rimosso
+    // per mantenere la classe pulita. Se ti serve, puoi lasciarlo, ma non viene chiamato.
 }
