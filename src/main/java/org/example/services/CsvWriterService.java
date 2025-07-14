@@ -26,14 +26,40 @@ public class CsvWriterService {
         csvPrinter.flush();
     }
 
+
     public void writeDataRow(String projectName, String methodID, String releaseName,
-                             String bugginess, MethodMetrics metrics) throws IOException {
+                             MethodMetrics metrics, String bugginess) throws IOException {
         List<Object> record = new ArrayList<>();
         record.add(projectName);
         record.add(methodID);
         record.add(releaseName);
+
+        List<Object> metricValues = metrics.toList();
+        record.addAll(metricValues);
         record.add(bugginess);
-        record.addAll(metrics.toList());
+
+        // --- DEBUG ---
+        boolean hasAnomaly = false;
+        for (Object val : metricValues) {
+            if (val instanceof Number) {
+                double numVal = ((Number) val).doubleValue();
+                // Controlla per valori enormi o non validi
+                if (numVal > 1000000 || Double.isInfinite(numVal) || Double.isNaN(numVal)) {
+                    hasAnomaly = true;
+                    break;
+                }
+            }
+        }
+
+        if (hasAnomaly) {
+            System.err.println("!!! ANOMALIA NUMERICA RILEVATA !!!");
+            System.err.println("MethodID: " + methodID);
+            System.err.println("ReleaseID: " + releaseName);
+            System.err.println("Valori metriche grezzi: " + metricValues);
+            throw new RuntimeException("Anomalia numerica rilevata per il metodo " + methodID);
+        }
+        // ---------------------------------------------
+
         csvPrinter.printRecord(record);
     }
 

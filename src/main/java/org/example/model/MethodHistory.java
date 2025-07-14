@@ -12,7 +12,9 @@ public class MethodHistory {
     private final List<Change> changes = new ArrayList<>();
     private final List<RevCommit> bugFixCommits = new ArrayList<>();
 
-    // Classe interna per rappresentare una singola modifica
+    private int nFix = 0;
+
+
     public static class Change {
         public final RevCommit commit;
         public final int churn;
@@ -27,6 +29,18 @@ public class MethodHistory {
         this.uniqueID = uniqueID;
     }
 
+
+
+
+
+    public void incrementFixCount() {
+        this.nFix++;
+    }
+
+
+    public int getNFix() {
+        return this.nFix;
+    }
     public void addChange(RevCommit commit, int addedStmts, int deletedStmts) {
         int currentChurn = addedStmts + deletedStmts;
         if (currentChurn > 0) {

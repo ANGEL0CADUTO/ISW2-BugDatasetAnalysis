@@ -2,6 +2,7 @@
 package org.example.services;
 
 import com.github.javaparser.StaticJavaParser;
+import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import net.sourceforge.pmd.PMDConfiguration;
 import net.sourceforge.pmd.PmdAnalysis;
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class PmdAnalyzer {
     private final PMDConfiguration config;
@@ -28,12 +30,20 @@ public class PmdAnalyzer {
 
     public PmdAnalyzer() {
         config = new PMDConfiguration();
+
         config.addRuleSet("category/java/bestpractices.xml");
         config.addRuleSet("category/java/design.xml");
-        config.addRuleSet("category/java/codestyle.xml");
+
+        //ABILITA ANALISI PARALLELA ---
+        int numThreads = Runtime.getRuntime().availableProcessors();
+        LOGGER.info("Configurazione PMD per usare {} thread.", numThreads);
+        config.setThreads(numThreads);
+
 
         config.setDefaultLanguageVersion(
                 LanguageRegistry.PMD.getLanguageVersionById("java", "17"));
+
+
     }
 
     public Map<String, Integer> countSmellsPerMethod(Path releaseDir) {
@@ -41,6 +51,7 @@ public class PmdAnalyzer {
         Map<String, Integer> smellsPerMethod = new HashMap<>();
 
         PMDConfiguration releaseConfig = new PMDConfiguration();
+
         releaseConfig.setRuleSets(new ArrayList<>(config.getRuleSetPaths()));
         releaseConfig.setMinimumPriority(RulePriority.LOW);
         releaseConfig.setDefaultLanguageVersion(
@@ -52,18 +63,45 @@ public class PmdAnalyzer {
 
             LOGGER.info("Analisi PMD completata. Trovate {} violazioni.", report.getViolations().size());
 
-            for (RuleViolation violation : report.getViolations()) {
-                // --- QUESTA È LA RIGA CORRETTA ---
-                Path absoluteFilePath = Paths.get(violation.getFileId().getOriginalPath());
+// 1. Raggruppa le violazioni per file
+            Map<Path, List<RuleViolation>> violationsByFile = report.getViolations().stream()
+                    .collect(Collectors.groupingBy(v -> Paths.get(v.getFileId().getOriginalPath())));
 
-                int beginLine = violation.getBeginLine();
-                int endLine = violation.getEndLine();
+            // 2. Itera sui file, parsando ogni file una sola volta
+            for (Map.Entry<Path, List<RuleViolation>> entry : violationsByFile.entrySet()) {
+                Path filePath = entry.getKey();
+                List<RuleViolation> violationsInFile = entry.getValue();
 
-                String methodID = findMethodIDForViolation(absoluteFilePath, beginLine, endLine, releaseDir);
-                if (methodID != null) {
-                    smellsPerMethod.put(methodID, smellsPerMethod.getOrDefault(methodID, 0) + 1);
+                try {
+                    // Parsa il file UNA SOLA VOLTA
+                    CompilationUnit cu = StaticJavaParser.parse(filePath);
+                    List<MethodDeclaration> methodsInFile = cu.findAll(MethodDeclaration.class);
+
+                    // 3. Per ogni violazione in questo file, trova il metodo corrispondente
+                    for (RuleViolation violation : violationsInFile) {
+                        int beginLine = violation.getBeginLine();
+                        int endLine = violation.getEndLine();
+
+                        Optional<MethodDeclaration> foundMethod = methodsInFile.stream()
+                                .filter(md -> md.getRange().isPresent() &&
+                                        md.getRange().get().begin.line <= beginLine &&
+                                        md.getRange().get().end.line >= endLine)
+                                .findFirst();
+
+                        if (foundMethod.isPresent()) {
+                            String signature = foundMethod.get().getSignature().asString();
+                            String relativePath = releaseDir.relativize(filePath).toString().replace("\\", "/");
+                            String methodID = relativePath + "/" + signature;
+                            smellsPerMethod.put(methodID, smellsPerMethod.getOrDefault(methodID, 0) + 1);
+                        }
+                    }
+                } catch (IOException | StackOverflowError e) {
+                    LOGGER.warn("Impossibile parsare il file {} per la mappatura dello smell", filePath, e);
+                } catch (Exception e) {
+                    LOGGER.warn("Errore generico di parsing per il file {}", filePath, e);
                 }
             }
+
         } catch (Exception e) {
             LOGGER.error("Errore critico durante l'analisi PMD", e);
         }
