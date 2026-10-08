@@ -18,7 +18,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
-public class JiraService {
+public class JiraService implements AutoCloseable {
 
     private final CloseableHttpClient httpClient;
     private final ObjectMapper objectMapper;
@@ -46,8 +46,7 @@ public class JiraService {
                 JsonNode rootNode = objectMapper.readTree(jsonResponse);
 
                 if (response.getStatusLine().getStatusCode() != 200) {
-                    System.err.println("Errore da JIRA: " + jsonResponse);
-                    break;
+                    throw new IOException("Jira returned HTTP " + response.getStatusLine().getStatusCode() + ": " + jsonResponse);
                 }
                 JsonNode issuesNode = rootNode.path("issues");
                 if (!issuesNode.isArray() || issuesNode.size() == 0) {

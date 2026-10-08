@@ -37,7 +37,6 @@ import java.util.stream.Collectors;
 
 public class Main {
 
-    // 1. INTRODUZIONE DI UN LOGGER STANDARD
     private static final Logger LOGGER = Logger.getLogger(Main.class.getName());
 
     public static final AtomicInteger renameCount = new AtomicInteger(0);
@@ -70,27 +69,40 @@ public class Main {
 
 
     public static void main(String[] args) {
-        ProjectConfig bookkeeperConfig = new ProjectConfig(
-                "BOOKKEEPER",
-                "C:/Users/aroma/IdeaProjects/bookkeeper",
-                "./bookkeeper_dataset.csv"
-        );
+        if (args.length == 0 || (args.length == 1 && "--help".equals(args[0]))) {
+            printUsage();
+            return;
+        }
+        if (args.length != 3) {
+            System.err.println("Expected a project key, repository path and output CSV path.");
+            printUsage();
+            System.exit(2);
+        }
 
-        ProjectConfig avroConfig = new ProjectConfig(
-                "AVRO",
-                "C:/Users/aroma/IdeaProjects/avro",
-                "./avro_dataset.csv"
-        );
+        String projectKey = args[0].toUpperCase(Locale.ROOT);
+        Path repositoryPath = Paths.get(args[1]).toAbsolutePath().normalize();
+        if (!projectKey.matches("[A-Z][A-Z0-9_]*") ||
+                !Files.isDirectory(repositoryPath.resolve(".git"))) {
+            System.err.println("Use a valid Jira project key and a local Git clone with its .git directory.");
+            System.exit(2);
+        }
 
-        new Main().run(bookkeeperConfig);
-        new Main().run(avroConfig);
+        ProjectConfig config = new ProjectConfig(projectKey, repositoryPath.toString(), args[2]);
+        if (!new Main().run(config)) {
+            System.exit(1);
+        }
+    }
+
+    private static void printUsage() {
+        System.out.println("Usage: org.example.Main <PROJECT_KEY> <repository-path> <output.csv>");
+        System.out.println("Example: org.example.Main AVRO ./repositories/avro ./results/avro_dataset.csv");
     }
 
     /**
-     * Metodo principale orchestratore, ora con complessità ridotta.
-     * Delega i compiti principali a metodi privati.
+     * Esegue la pipeline di analisi e segnala se il dataset è stato completato.
      */
-    public void run(ProjectConfig config) {
+    public boolean run(ProjectConfig config) {
+        boolean completed = false;
         long totalStartTime = System.currentTimeMillis();
         LOGGER.log(Level.INFO, "Avvio generazione dataset per il progetto: {0}", config.getProjectName());
 
@@ -106,7 +118,10 @@ public class Main {
                     "ClassNR", "ClassNAuth", "ClassChurn", "AvgClassChurn", "Bugginess");
 
             List<Release> allReleases = getReleases(gitService);
-            List<JiraTicket> allTickets = new JiraService().getFixedBugTickets(config.getProjectName());
+            List<JiraTicket> allTickets;
+            try (JiraService jiraService = new JiraService()) {
+                allTickets = jiraService.getFixedBugTickets(config.getProjectName());
+            }
 
             BugginessLogic bugginessLogic = new BugginessLogic(allReleases, null);
             bugginessLogic.calculateBugLifecycles(allTickets);
@@ -120,9 +135,9 @@ public class Main {
             processReleases(consideredReleases, context, gitService);
 
             printSummary();
+            completed = true;
 
         } catch (Exception e) {
-            // --- LOGGER CONCATENATION FIX ---
             LOGGER.log(Level.SEVERE, "Errore fatale durante l''esecuzione del progetto {0}", new Object[]{config.getProjectName()});
             LOGGER.log(Level.SEVERE, "Dettagli errore:", e);
         } finally {
@@ -133,18 +148,18 @@ public class Main {
                 try {
                     csvWriter.close();
                 } catch (IOException e) {
+                    completed = false;
                     LOGGER.log(Level.WARNING, "Errore durante la chiusura del CsvWriter.", e);
                 }
             }
 
             LOGGER.log(Level.INFO, "Esecuzione terminata per {0}. Tempo totale: {1}ms",
                     new Object[]{config.getProjectName(), (System.currentTimeMillis() - totalStartTime)});
-            LOGGER.log(Level.INFO, "Dataset salvato in: {0}", new File(config.getOutputCsvPath()).getAbsolutePath());
+            if (completed) {
+                LOGGER.log(Level.INFO, "Dataset salvato in: {0}", new File(config.getOutputCsvPath()).getAbsolutePath());
+            }
         }
-
-        LOGGER.log(Level.INFO, "Esecuzione terminata per {0}. Tempo totale: {1}ms",
-                new Object[]{config.getProjectName(), (System.currentTimeMillis() - totalStartTime)});
-        LOGGER.log(Level.INFO, "Dataset salvato in: {0}", new File(config.getOutputCsvPath()).getAbsolutePath());
+        return completed;
     }
 
     /**
